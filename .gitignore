@@ -1,12 +1,25 @@
-node_modules/
+# 构建产物
+build/
+*.apk
+*.ap_
+*.dex
+*.class
+
+# 签名密钥（build.sh 会在缺失时自动生成）
+tools/debug.keystore
+
+# 内部开发资产：不对外公开
+PROGRESS.md
+DEVLOG.md
+tools/p*_static_check.py
+relax_p22.py
+
+# Python
 __pycache__/
 *.pyc
-.venv/
-venv/
-dist/
-build/
-.ruff_cache/
-.mypy_cache/
-.pytest_cache/
-*.log
+
+# 编辑器 / 系统
+.idea/
+*.iml
 .DS_Store
+local.properties
