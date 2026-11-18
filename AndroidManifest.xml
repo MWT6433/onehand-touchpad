@@ -8,6 +8,16 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
+    <!-- 任务切换器要按包名取应用图标与名称。Android 11 起的包可见性会直接抛
+         NameNotFoundException（实测：列表 3 条全被过滤空，日志 no_installed_tasks），
+         因此声明"可启动应用"这一类查询；比 QUERY_ALL_PACKAGES 窄，覆盖范围正好够用。 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_pad"

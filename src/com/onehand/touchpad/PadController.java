@@ -25,7 +25,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
-final class PadController implements PanelView.Listener, SideToggleBar.Listener {
+final class PadController implements PanelView.Listener, SideToggleBar.Listener,
+        TaskSwitcherView.Listener {
     enum State {
         SETTLED,
         PULLING,
@@ -79,6 +80,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
     private final CursorView cursorView;
     private final SideToggleBar sideToggleBarView;
     private QuickMenuView quickMenuView;
+    private TaskSwitcherView taskSwitcherView;
 
     private final int screenWidth;
     private final int screenHeight;
@@ -113,6 +115,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
     private WindowManager.LayoutParams cursorParams;
     private WindowManager.LayoutParams sideToggleBarParams;
     private WindowManager.LayoutParams quickMenuParams;
+    private WindowManager.LayoutParams taskSwitcherParams;
     private State state = State.SETTLED;
     private boolean started;
     private boolean panelAttached;
@@ -121,11 +124,14 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
     private boolean sideToggleBarAttached;
     private boolean quickMenuOpen;
     private boolean quickMenuAttached;
+    private boolean taskSwitcherOpen;
+    private boolean taskSwitcherAttached;
     private boolean menuShownThisPull;
     private int panelWindowType;
     private int cursorWindowType;
     private int sideToggleBarWindowType;
     private int quickMenuWindowType;
+    private int taskSwitcherWindowType;
 
     private boolean panelGestureActive;
     private boolean gestureMoved;
@@ -163,6 +169,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
     private long lastTapUpTime;
     private float lastTapDownRawX;
     private float lastTapDownRawY;
+    private long lastHandleTapUpTime;
+    private float lastHandleTapRawX;
+    private float lastHandleTapRawY;
 
     private boolean lpdActive;
     private boolean lpdFinalPending;
@@ -205,6 +214,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
                 return;
             }
             if (state == State.SETTLED && !gestureMoved) {
+                lastHandleTapUpTime = 0L;
                 adjustAnchorTop = panelParams.y;
                 panelView.setAdjustMode(true);
                 transitionTo(State.ADJUST);
@@ -350,6 +360,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
     void destroy() {
         cancelRetractAnimator();
         removeQuickMenu("destroy");
+        hideTaskSwitcher("destroy");
         panelView.setAdjustMode(false);
         started = false;
         mainHandler.removeCallbacks(longPressRunnable);
@@ -364,6 +375,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
         panelGestureActive = false;
         panelFollowing = false;
         lastTapUpTime = 0L;
+        lastHandleTapUpTime = 0L;
         lpdActive = false;
         runtimeState = "已停止";
     }
@@ -506,6 +518,23 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
         return params;
     }
 
+    private WindowManager.LayoutParams createTaskSwitcherParams() {
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams();
+        params.type = WINDOW_TYPE_ACCESSIBILITY;
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.format = PixelFormat.TRANSLUCENT;
+        params.width = screenWidth;
+        params.height = screenHeight;
+        params.x = 0;
+        params.y = 0;
+        params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+        params.windowAnimations = 0;
+        return params;
+    }
+
     private WindowManager.LayoutParams createSideToggleBarParams() {
         WindowManager.LayoutParams params = new WindowManager.LayoutParams();
         params.type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
@@ -599,6 +628,127 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
         quickMenuParams = null;
         quickMenuWindowType = 0;
         log.info("MENU_HIDE", "reason=" + reason);
+    }
+
+    private void showTaskSwitcher() {
+        if (taskSwitcherOpen || !started || !panelAttached || state != State.SETTLED) {
+            return;
+        }
+        ShizukuInjector shizukuInjector = shizukuInjector();
+        if (shizukuInjector == null) {
+            log.info("TASK_SWITCHER", "show=0 reason=no_shizuku");
+            return;
+        }
+        String[] rows;
+        try {
+            rows = shizukuInjector.listRecentTasks(8);
+        } catch (Throwable exception) {
+            rows = new String[0];
+            log.warn("TASK_SWITCHER", "show=0 reason=list:"
+                    + exception.getClass().getSimpleName());
+        }
+        if (rows == null || rows.length == 0) {
+            log.info("TASK_SWITCHER", "show=0 reason=no_tasks");
+            return;
+        }
+
+        TaskSwitcherView nextView;
+        try {
+            nextView = new TaskSwitcherView(context, isLeftEdge(), screenWidth,
+                    screenHeight, panelParams.y, rows);
+        } catch (Throwable exception) {
+            log.warn("TASK_SWITCHER", "show=0 reason=create:"
+                    + exception.getClass().getSimpleName());
+            return;
+        }
+        if (nextView.getTaskCount() == 0) {
+            log.info("TASK_SWITCHER", "show=0 reason=no_installed_tasks");
+            return;
+        }
+        nextView.setListener(this);
+
+        try {
+            setHandleSuppressed(true);
+        } catch (RuntimeException exception) {
+            log.warn("TASK_SWITCHER", "show=0 reason=suppress:"
+                    + exception.getClass().getSimpleName());
+            return;
+        }
+        taskSwitcherView = nextView;
+        try {
+            taskSwitcherParams = createTaskSwitcherParams();
+            taskSwitcherWindowType = addOverlayWindow(
+                    taskSwitcherView, taskSwitcherParams, "task_switcher");
+        } catch (Throwable exception) {
+            taskSwitcherWindowType = 0;
+            log.warn("TASK_SWITCHER", "show=0 reason=add:"
+                    + exception.getClass().getSimpleName());
+        }
+        taskSwitcherAttached = taskSwitcherWindowType != 0;
+        if (!taskSwitcherAttached) {
+            taskSwitcherView = null;
+            taskSwitcherParams = null;
+            taskSwitcherWindowType = 0;
+            setHandleSuppressed(false);
+            return;
+        }
+
+        taskSwitcherOpen = true;
+        log.info("TASK_SWITCHER", "show=1 side=" + side
+                + " rows=" + nextView.getTaskCount()
+                + " handleY=" + panelParams.y);
+    }
+
+    private void hideTaskSwitcher() {
+        hideTaskSwitcher("hide");
+    }
+
+    private void hideTaskSwitcher(String reason) {
+        if (!taskSwitcherOpen && !taskSwitcherAttached) {
+            return;
+        }
+        taskSwitcherOpen = false;
+        if (taskSwitcherAttached) {
+            try {
+                windowManager.removeViewImmediate(taskSwitcherView);
+            } catch (RuntimeException ignored) {
+                // The accessibility window may already have been detached.
+            }
+        }
+        taskSwitcherAttached = false;
+        taskSwitcherView = null;
+        taskSwitcherParams = null;
+        taskSwitcherWindowType = 0;
+        setHandleSuppressed(false);
+        log.info("TASK_SWITCHER", "show=0 reason=" + reason);
+    }
+
+    @Override
+    public void onTaskSelected(int taskId) {
+        ShizukuInjector shizukuInjector = shizukuInjector();
+        boolean ok = false;
+        String reason = "no_shizuku";
+        try {
+            if (shizukuInjector != null) {
+                ok = shizukuInjector.focusTask(taskId);
+                reason = ok ? "none" : "focus_failed";
+            }
+        } catch (Throwable exception) {
+            reason = exception.getClass().getSimpleName();
+        }
+        log.info("TASK_SWITCH", "ok=" + (ok ? 1 : 0)
+                + " taskId=" + taskId + " reason=" + reason);
+        hideTaskSwitcher("select");
+    }
+
+    @Override
+    public void onDismissRequested() {
+        hideTaskSwitcher("outside");
+    }
+
+    private ShizukuInjector shizukuInjector() {
+        return injector instanceof ShizukuInjector
+                ? (ShizukuInjector) injector : null;
     }
 
     private void removeSideToggleBar() {
@@ -726,6 +876,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
                 return;
             }
             gestureMoved = true;
+            lastHandleTapUpTime = 0L;
             mainHandler.removeCallbacks(longPressRunnable);
             if (pullDistance >= pullTriggerPx) {
                 beginPulling(rawX, rawY, gestureDx, gestureDy, pullDistance);
@@ -817,6 +968,14 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
         panelFollowing = false;
 
         if (state == State.SETTLED) {
+            boolean isHandleTap = eventTime - gestureDownTime < tapTimeout
+                    && !gestureMoved
+                    && !longPressTriggered;
+            if (isHandleTap) {
+                handleSettledTap(eventTime);
+            } else {
+                lastHandleTapUpTime = 0L;
+            }
             panelGestureActive = false;
             injectionSuppressedForGesture = false;
             return true;
@@ -902,6 +1061,23 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
             transitionTo(State.SETTLED);
         }
         return true;
+    }
+
+    private void handleSettledTap(long eventTime) {
+        boolean secondTap = lastHandleTapUpTime > 0L
+                && eventTime - lastHandleTapUpTime <= doubleTapTimeout
+                && Math.hypot(gestureDownRawX - lastHandleTapRawX,
+                gestureDownRawY - lastHandleTapRawY) < touchSlop;
+        if (secondTap) {
+            long doubleTapDt = Math.max(0L, eventTime - lastHandleTapUpTime);
+            lastHandleTapUpTime = 0L;
+            log.info("HANDLE_TAP", "kind=double_tap dt=" + doubleTapDt);
+            showTaskSwitcher();
+            return;
+        }
+        lastHandleTapUpTime = eventTime;
+        lastHandleTapRawX = gestureDownRawX;
+        lastHandleTapRawY = gestureDownRawY;
     }
 
     @Override

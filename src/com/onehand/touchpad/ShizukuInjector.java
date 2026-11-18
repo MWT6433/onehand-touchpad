@@ -585,6 +585,56 @@ final class ShizukuInjector implements Injector {
         return api;
     }
 
+    /**
+     * 返回 taskId\tpkg\ttopActivity\tlastActiveTimeMs\tflags 的数组。
+     * Shizuku 尚未就绪或 binder 已断开时返回空数组，不向调用方抛异常。
+     */
+    String[] listRecentTasks(int maxCount) {
+        if (maxCount <= 0) {
+            return new String[0];
+        }
+        String reason = unavailableReason();
+        if (reason != null) {
+            log.warn("TASK_LIST", "ok=0 reason=" + reason);
+            return new String[0];
+        }
+        IInjectionApi current = api;
+        try {
+            String[] tasks = current.listRecentTasks(maxCount);
+            return tasks == null ? new String[0] : tasks;
+        } catch (Throwable exception) {
+            api = null;
+            log.warn("TASK_LIST", "ok=0 reason=" + exceptionReason(exception));
+            return new String[0];
+        }
+    }
+
+    /** 切到指定任务；任务 ID 非法、通道不可用或远端失败时返回 false。 */
+    boolean focusTask(int taskId) {
+        if (taskId <= 0) {
+            log.warn("TASK_FOCUS", "ok=0 reason=invalid_task_id");
+            return false;
+        }
+        String reason = unavailableReason();
+        if (reason != null) {
+            log.warn("TASK_FOCUS", "ok=0 reason=" + reason);
+            return false;
+        }
+        IInjectionApi current = api;
+        try {
+            boolean focused = current.focusTask(taskId);
+            log.info("TASK_FOCUS", "ok=" + (focused ? 1 : 0)
+                    + " taskId=" + taskId
+                    + (focused ? "" : " reason=service_false"));
+            return focused;
+        } catch (Throwable exception) {
+            api = null;
+            log.warn("TASK_FOCUS", "ok=0 taskId=" + taskId
+                    + " reason=" + exceptionReason(exception));
+            return false;
+        }
+    }
+
     private String fallbackReason() {
         if (destroyed) {
             return null;

@@ -440,13 +440,20 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
                     boolean removed = removeTaskWithBackend(taskBinder, taskId);
                     logTaskPath(taskBinder.name + "_remove", removed,
                             removed ? "" : "not_removed");
-                    return removed;
+                    if (removed) {
+                        return true;
+                    }
                 } catch (Throwable exception) {
                     logTaskPath(taskBinder.name + "_remove", false,
                             shortTaskError(exception));
                 }
             }
-            return false;
+            // 与 focus 同理：进程包名归属检查会把 binder 路径拦掉，而 system_server 执行
+            // shell 命令的路径放行。am stack remove 的入参其实是 taskId（不是 stack id），
+            // 真机实测：执行后该任务从 recents 消失（3 条 → 2 条）。
+            boolean removedByShell = runShellTaskCommand("stack remove", taskId, "Stack remove");
+            logTaskPath("shell_remove", removedByShell, removedByShell ? "" : "not_removed");
+            return removedByShell;
         } catch (Throwable exception) {
             logTaskPath("remove_task", false, shortTaskError(exception));
             return false;
@@ -479,13 +486,21 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
                     boolean focused = focusTaskWithBackend(taskBinder, taskId);
                     logTaskPath(taskBinder.name + "_focus", focused,
                             focused ? "" : "not_focused");
-                    return focused;
+                    if (focused) {
+                        return true;
+                    }
                 } catch (Throwable exception) {
                     logTaskPath(taskBinder.name + "_focus", false,
                             shortTaskError(exception));
                 }
             }
-            return false;
+            // 真机实测：从 shell uid 的进程调 moveTaskToFront / startActivityFromRecents 会被
+            // "package=com.onehand.touchpad does not belong to uid=2000" 拦掉，而 system_server
+            // 执行 shell 命令的路径不受这一条限制（adb shell am task focus <id> 实测成功），
+            // 因此在 shell 进程里 fork 一次 am 作为最后兜底。
+            boolean focusedByShell = focusTaskWithShellCommand(taskId);
+            logTaskPath("shell_focus", focusedByShell, focusedByShell ? "" : "not_focused");
+            return focusedByShell;
         } catch (Throwable exception) {
             logTaskPath("focus_task", false, shortTaskError(exception));
             return false;
@@ -557,7 +572,7 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
 
         try {
             TaskBackend binder = resolveBinderInterface(
-                    "binder", "android.app.IActivityManager",
+                    "binder", "activity", "android.app.IActivityManager",
                     "android.app.IActivityManager$Stub");
             logTaskPath("binder", true, "");
             return binder;
@@ -572,7 +587,7 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
     private TaskBackend resolveActivityTaskManagerBackend() {
         try {
             TaskBackend taskBackend = resolveBinderInterface(
-                    "binder_task", "android.app.IActivityTaskManager",
+                    "binder_task", "activity_task", "android.app.IActivityTaskManager",
                     "android.app.IActivityTaskManager$Stub");
             logTaskPath("binder_task", true, "");
             return taskBackend;
@@ -610,8 +625,12 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
     }
 
     private static TaskBackend resolveBinderInterface(
-            String name, String interfaceClass, String stubClass) throws Exception {
-        IBinder binder = getServiceBinder("activity");
+            String name, String serviceName, String interfaceClass, String stubClass)
+            throws Exception {
+        // 服务名必须由调用方给：IActivityManager 在 "activity"，IActivityTaskManager 在
+        // "activity_task"。写死 "activity" 会让任务管理器的 descriptor 永远对不上（实测报
+        // IllegalStateException: descriptor_android.app.IActivityManager）。
+        IBinder binder = getServiceBinder(serviceName);
         String descriptor = binder.getInterfaceDescriptor();
         if (!interfaceClass.equals(descriptor)) {
             throw new IllegalStateException("descriptor_" + descriptor);
@@ -619,7 +638,10 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
         Class<?> stub = Class.forName(stubClass);
         Method asInterface = stub.getDeclaredMethod("asInterface", IBinder.class);
         asInterface.setAccessible(true);
-        Object receiver = asInterface.invoke(null, new ShizukuBinderWrapper(binder));
+        // 本类就运行在 Shizuku 拉起的 shell 进程里，ServiceManager 拿到的是真实 binder，
+        // 直接用即可；套 ShizukuBinderWrapper 反而会被判定为非 Shizuku binder
+        // （实测报 IllegalStateException: binder havent been received）。
+        Object receiver = asInterface.invoke(null, binder);
         if (receiver == null) {
             throw new IllegalStateException("null_binder_interface");
         }
@@ -690,6 +712,51 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
             return ((Number) result).intValue() == 0;
         }
         return true;
+    }
+
+    /** 用 am 的 shell 命令操作任务：system_server 侧执行，绕开进程包名归属检查。 */
+    private boolean focusTaskWithShellCommand(int taskId) {
+        return runShellTaskCommand("task focus", taskId, "Setting focus to task");
+    }
+
+    /**
+     * @param subcommand 例如 "task focus" / "stack remove"
+     * @param expectOutput 非空时要求 stdout 含该子串；am stack remove 成功时是静默的，故传空串
+     */
+    private boolean runShellTaskCommand(String subcommand, int taskId, String expectOutput) {
+        if (taskId <= 0) {
+            return false;
+        }
+        java.lang.Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(new String[]{
+                    "/system/bin/sh", "-c", "am " + subcommand + " " + taskId});
+            StringBuilder output = new StringBuilder();
+            java.io.InputStream stream = process.getInputStream();
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(stream, "UTF-8"))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append(' ');
+                }
+            }
+            int exit = process.waitFor();
+            if (exit != 0) {
+                return false;
+            }
+            return expectOutput.isEmpty() || output.indexOf(expectOutput) >= 0;
+        } catch (Throwable exception) {
+            logTaskPath("shell_focus_error", false, shortTaskError(exception));
+            return false;
+        } finally {
+            if (process != null) {
+                try {
+                    process.destroy();
+                } catch (Throwable ignored) {
+                    // Best effort: the child is already gone in the success path.
+                }
+            }
+        }
     }
 
     private static List<?> unwrapTaskList(Object value) throws Exception {
