@@ -86,6 +86,12 @@ final class TaskSwitcherView extends View {
     private static final int DRAWER_COLOR = 0xEC5E5E5E;
     private static final int OUTER_STROKE_COLOR = 0xFF000000;
     private static final int INNER_STROKE_COLOR = 0x57FFFFFF;
+    /**
+     * 吸附态手柄的填充色。必须与 PanelView.drawHandle 同源（黑 + Prefs.HANDLE_ALPHA），
+     * 因为形变的终点就是那根横条：颜色不同的话，摘窗那一帧会突然变色。
+     */
+    private static final int HANDLE_FILL_COLOR =
+            Color.argb(Math.round(Prefs.HANDLE_ALPHA * 255f), 0, 0, 0);
     private static final int CURRENT_ROW_COLOR = 0xFF3070E8;
     private static final int TITLE_COLOR = 0xA8FFFFFF;
     private static final int NAME_COLOR = 0xFFFFFFFF;
@@ -148,6 +154,9 @@ final class TaskSwitcherView extends View {
 
     private Listener listener;
     private float drawerLeft;
+    /** 抽屉贴边距离：由手柄矩形反推，保证形变时靠屏幕那一侧的边不动。 */
+    private float edgeGap;
+    private float handleTopSeed;
     private float drawerTop;
     private float drawerWidth;
     private float drawerHeight;
@@ -184,6 +193,8 @@ final class TaskSwitcherView extends View {
         // 基础宽 200dp × k；再小的屏也不超过 88% 屏宽。
         drawerWidth = Math.max(1f,
                 Math.min(dp(DRAWER_WIDTH_DP), screenWidth * 0.88f));
+        // 先按贴边 0 排一次；控制器写入手柄矩形后由 setHandleRect 修正成手柄的同款贴边距离。
+        this.handleTopSeed = handleTop;
         drawerLeft = leftHandle
                 ? 0f
                 : Math.max(0f, screenWidth - drawerWidth);
@@ -246,9 +257,27 @@ final class TaskSwitcherView extends View {
                 drawerLeft + drawerWidth, drawerTop + drawerHeight);
     }
 
-    /** 形变起点：手柄矩形（由控制器开窗时写入）。 */
+    /**
+     * 形变起点：手柄矩形（由控制器开窗时写入）。
+     *
+     * 顺带把抽屉的贴边距离对齐成手柄的贴边距离（左右对称取靠屏那一侧）：
+     * 这样形变过程中靠屏幕的那条边始终不动，只有内侧边在长——用户要的正是
+     * 「过渡动画没有横向位移」；末帧矩形也因此和真实手柄逐像素重合。
+     */
     void setHandleRect(RectF rect) {
         handleRect.set(rect);
+        if (!rect.isEmpty()) {
+            float gap = leftHandle
+                    ? Math.max(0f, rect.left)
+                    : Math.max(0f, screenWidth - rect.right);
+            if (Math.abs(gap - edgeGap) > 0.5f) {
+                edgeGap = gap;
+                drawerLeft = leftHandle
+                        ? gap
+                        : Math.max(0f, screenWidth - gap - drawerWidth);
+                layoutDrawer(handleTopSeed);
+            }
+        }
         invalidate();
     }
 
@@ -316,13 +345,31 @@ final class TaskSwitcherView extends View {
         canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
         scrimPaint.setAlpha(0x99);
 
+        // 终点与吸附态手柄同源：形变到横条时填色、两条发丝线的颜色/线宽/内缩逐项
+        // 收敛到 PanelView.drawHandle 的取值，摘窗那一帧才不会有颜色跳变。
+        // （面板收回动画早就用同一套办法，见 PanelView.drawPanel 的 collapse 分支。）
+        float toHandle = 1f - morph;
+        float hairline = Math.max(1f, PanelView.HAIRLINE_DP * density());
+        drawerPaint.setColor(blendArgb(DRAWER_COLOR, HANDLE_FILL_COLOR, toHandle));
         canvas.drawRoundRect(card, corner, corner, drawerPaint);
-        canvas.drawRoundRect(card, corner, corner, outerStrokePaint);
+
+        float outerInset = lerp(0f, hairline / 2f, toHandle);
+        outerStrokePaint.setStrokeWidth(lerp(dp(1), hairline, toHandle));
+        outerStrokePaint.setColor(
+                blendArgb(OUTER_STROKE_COLOR, PanelView.FRAME_OUTER, toHandle));
+        barRect.set(card);
+        barRect.inset(outerInset, outerInset);
+        float outerRadius = Math.max(0f, corner - outerInset);
+        canvas.drawRoundRect(barRect, outerRadius, outerRadius, outerStrokePaint);
+
+        float innerInset = lerp(dp(1), hairline * 1.5f, toHandle);
+        innerStrokePaint.setStrokeWidth(lerp(innerStrokeWidth, hairline, toHandle));
+        innerStrokePaint.setColor(
+                blendArgb(INNER_STROKE_COLOR, PanelView.FRAME_INNER, toHandle));
         innerStrokeRect.set(card);
-        innerStrokeRect.inset(dp(1), dp(1));
-        canvas.drawRoundRect(innerStrokeRect,
-                Math.max(0f, corner - dp(1)), Math.max(0f, corner - dp(1)),
-                innerStrokePaint);
+        innerStrokeRect.inset(innerInset, innerInset);
+        float innerRadius = Math.max(0f, corner - innerInset);
+        canvas.drawRoundRect(innerStrokeRect, innerRadius, innerRadius, innerStrokePaint);
 
         int restoreTo = canvas.save();
         if (card != drawerRect && morph < 1f) {
@@ -348,6 +395,20 @@ final class TaskSwitcherView extends View {
             canvas.restoreToCount(contentLayer);
         }
         canvas.restoreToCount(restoreTo);
+    }
+
+    private static float lerp(float from, float to, float p) {
+        return from + (to - from) * p;
+    }
+
+    /** 逐通道（含 alpha）线性混合，与 PanelView.blendArgb 同语义。 */
+    private static int blendArgb(int from, int to, float p) {
+        float q = 1f - p;
+        return Color.argb(
+                Math.round(Color.alpha(from) * q + Color.alpha(to) * p),
+                Math.round(Color.red(from) * q + Color.red(to) * p),
+                Math.round(Color.green(from) * q + Color.green(to) * p),
+                Math.round(Color.blue(from) * q + Color.blue(to) * p));
     }
 
     private void drawTitle(Canvas canvas) {

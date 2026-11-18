@@ -121,6 +121,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private WindowManager.LayoutParams taskSwitcherParams;
     private ValueAnimator taskSwitcherMorphAnimator;
     private Runnable taskSwitcherCloseWatchdog;
+    private ViewTreeObserver.OnDrawListener switcherFirstDrawListener;
+    private boolean switcherFirstDrawDone;
     private final RectF taskSwitcherHandleRect = new RectF();
     private State state = State.SETTLED;
     private boolean started;
@@ -688,13 +690,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         nextView.setListener(this);
         nextView.setOpeningTime(gestureDownTime);
 
-        try {
-            setHandleSuppressed(true);
-        } catch (RuntimeException exception) {
-            log.warn("TASK_SWITCHER", "show=0 reason=suppress:"
-                    + exception.getClass().getSimpleName());
-            return;
-        }
         taskSwitcherView = nextView;
         try {
             taskSwitcherParams = createTaskSwitcherParams();
@@ -719,6 +714,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         nextView.setHandleRect(taskSwitcherHandleRect);
         nextView.setMorph(0f);
         nextView.setInteractive(false);
+        hideHandleOnFirstDraw(nextView);
         startSwitcherMorph(0f, 1f, null);
         log.info("TASK_SWITCHER", "show=1 side=" + side
                 + " rows=" + nextView.getTaskCount()
@@ -747,6 +743,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private void detachTaskSwitcher(String reason) {
         cancelSwitcherCloseWatchdog();
+        // 先恢复底层手柄、再摘窗：抽屉最后一帧本身就是手柄，交接看不出变化。
+        setHandleSuppressed(false);
         if (taskSwitcherAttached) {
             try {
                 windowManager.removeViewImmediate(taskSwitcherView);
@@ -758,7 +756,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         taskSwitcherView = null;
         taskSwitcherParams = null;
         taskSwitcherWindowType = 0;
-        setHandleSuppressed(false);
         log.info("TASK_SWITCHER", "show=0 reason=" + reason);
     }
 
@@ -778,6 +775,44 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         };
         mainHandler.postDelayed(taskSwitcherCloseWatchdog,
                 RETRACT_DURATION_MS + 250L);
+    }
+
+    /**
+     * 抽屉的第一帧真正画出来之后再藏底层手柄。
+     *
+     * 新窗口的首个 buffer 比"隐藏旧窗口"晚一帧到达：无论先藏后挂、还是同帧藏，
+     * 都会露出一帧"手柄没了、抽屉还没画出来"的空档（2026-11-18 真机录屏 f043：
+     * 手柄区灰度 247.5 = 页面底色，正常应为 ~136）。挂在 OnDrawListener 上，
+     * 隐藏动作与抽屉的首帧落在同一帧，交接逐像素无缝。
+     */
+    private void hideHandleOnFirstDraw(final TaskSwitcherView view) {
+        switcherFirstDrawDone = false;
+        switcherFirstDrawListener = new ViewTreeObserver.OnDrawListener() {
+            @Override
+            public void onDraw() {
+                if (switcherFirstDrawDone) {
+                    return;
+                }
+                switcherFirstDrawDone = true;
+                try {
+                    setHandleSuppressed(true);
+                } catch (RuntimeException exception) {
+                    log.warn("TASK_SWITCHER", "suppress_failed:"
+                            + exception.getClass().getSimpleName());
+                }
+                // removeOnDrawListener 不许在 onDraw 里调用，Android 会直接抛
+                // IllegalStateException("Cannot call removeOnDrawListener inside of onDraw")
+                // 把整个进程带走（2026-11-18 真机 19:18:44 实测崩溃）。排到本帧绘制之后。
+                view.post(() -> {
+                    ViewTreeObserver observer = view.getViewTreeObserver();
+                    if (observer.isAlive() && switcherFirstDrawListener != null) {
+                        observer.removeOnDrawListener(switcherFirstDrawListener);
+                        switcherFirstDrawListener = null;
+                    }
+                });
+            }
+        };
+        view.getViewTreeObserver().addOnDrawListener(switcherFirstDrawListener);
     }
 
     private void cancelSwitcherCloseWatchdog() {

@@ -33,11 +33,11 @@ final class PanelView extends View {
     private static final String[] ARROW_DIRECTIONS = {"left", "right", "down", "up"};
 
     // P49：面板灰面再加深、透明度再降低，箭头不再依赖黑块或圆形底。
-    private static final float HAIRLINE_DP = 0.35f;
+    static final float HAIRLINE_DP = 0.35f;
     private static final int PANEL_SURFACE = 0x665E5E5E;
     private static final int PANEL_SURFACE_ADJUST = 0x4D3070E8;
-    private static final int FRAME_OUTER = 0x3D000000;
-    private static final int FRAME_INNER = 0x4DFFFFFF;
+    static final int FRAME_OUTER = 0x3D000000;
+    static final int FRAME_INNER = 0x4DFFFFFF;
     private static final int CELL_FILL_ADJUST = 0xF23B82F6;
     private static final int CHEVRON_COLOR = 0xFFFFFFFF;
     private static final int CHEVRON_HALO = 0x59000000;      // 35% 黑，作为白色箭头的衬托
