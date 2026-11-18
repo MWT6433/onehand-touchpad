@@ -200,7 +200,7 @@ final class PanelView extends View {
         drawingRect.set(left, 0f, left + width, height);
         fillPaint.setColor(adjustMode ? CELL_FILL_ADJUST : handleColor);
         canvas.drawRoundRect(drawingRect, radius, radius, fillPaint);
-        drawDoubleHairline(canvas, drawingRect, radius);
+        drawDoubleHairline(canvas, drawingRect, radius, 1f);
     }
 
     private void drawPanel(Canvas canvas, float alpha) {
@@ -216,10 +216,23 @@ final class PanelView extends View {
         canvas.clipRect(left, 0f, left + w, contentBottom);
 
         drawingRect.set(left, 0f, left + w, h);
-        applyContentAlpha(fillPaint,
-                adjustMode ? PANEL_SURFACE_ADJUST : PANEL_SURFACE, alpha);
+        // 折叠进度：w 从 panelWidth 收到 handleWidth 时为 0→1。
+        // 收回动画的终点必须与吸附态手柄同源（drawHandle 用 handleColor / 双层发丝线，
+        // 且 alpha 恒为 1）。此前这里按 contentAlpha 把面淡到全透明，动画最后一帧是空的，
+        // 随后 setHandleMode() 又画出黑条 ⇒ 中间闪一下。改为：折叠过程中面从
+        // PANEL_SURFACE 渐变到 handleColor，发丝线透明度同步回升到 1，终点逐像素对齐。
+        float collapse = panelWidth > handleWidth
+                ? Math.max(0f, Math.min(1f, (panelWidth - w) / (panelWidth - handleWidth)))
+                : 0f;
+        if (adjustMode) {
+            applyContentAlpha(fillPaint, PANEL_SURFACE_ADJUST, alpha);
+        } else if (collapse > 0f) {
+            fillPaint.setColor(blendArgb(PANEL_SURFACE, handleColor, collapse));
+        } else {
+            applyContentAlpha(fillPaint, PANEL_SURFACE, alpha);
+        }
         canvas.drawRoundRect(drawingRect, radius, radius, fillPaint);
-        drawDoubleHairline(canvas, drawingRect, radius);
+        drawDoubleHairline(canvas, drawingRect, radius, alpha + (1f - alpha) * collapse);
 
         if (collapseH < 0f || collapseH >= panelHeight - 0.5f) {
             float capsuleTop = panelHeight + gap;
@@ -241,11 +254,21 @@ final class PanelView extends View {
         canvas.restore();
     }
 
-    private void drawDoubleHairline(Canvas canvas, RectF rect, float radius) {
+    private void drawDoubleHairline(Canvas canvas, RectF rect, float radius, float alpha) {
         drawInsetHairline(canvas, rect, radius,
-                hairlinePx / 2f, FRAME_OUTER, 1f);
+                hairlinePx / 2f, FRAME_OUTER, alpha);
         drawInsetHairline(canvas, rect, radius,
-                hairlinePx * 1.5f, FRAME_INNER, 1f);
+                hairlinePx * 1.5f, FRAME_INNER, alpha);
+    }
+
+    /** 逐通道（含 alpha）线性混合两个 ARGB，用于收回动画的颜色过渡。 */
+    private static int blendArgb(int from, int to, float p) {
+        float q = 1f - p;
+        return Color.argb(
+                Math.round(Color.alpha(from) * q + Color.alpha(to) * p),
+                Math.round(Color.red(from) * q + Color.red(to) * p),
+                Math.round(Color.green(from) * q + Color.green(to) * p),
+                Math.round(Color.blue(from) * q + Color.blue(to) * p));
     }
 
     private void drawInsetHairline(Canvas canvas, RectF rect, float radius,

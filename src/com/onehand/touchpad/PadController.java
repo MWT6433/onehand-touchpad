@@ -94,7 +94,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
     private final int sideBarTopOffset;
     private final int windowWidth;
     private final int windowHeight;
-    private final int settledX;
+    private int settledX;
     private int settledY;
     private final int arrowSwipeVertical;
     private final int arrowSwipeHorizontal;
@@ -106,7 +106,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
     private final float echoRadiusPx;
     private final float cursorRadius;
     private final float outwardOffset;
-    private final String side;
+    private String side;   // P53：切换左右手改为原地生效，不再重建控制器
     private final boolean clickModeWindow;
 
     private WindowManager.LayoutParams panelParams;
@@ -195,6 +195,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
     private int retractStartX;
     private int retractStartY;
     private ValueAnimator retractAnimator;
+    private String sideSwitchTarget;
+    private String sideSwitchActionSide;
 
     private final Runnable longPressRunnable = new Runnable() {
         @Override
@@ -1250,6 +1252,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
         panelFollowing = false;
         injectionSuppressedForGesture = false;
         pullClickMode = false;
+        if (selectedRow == 1 && !clickMode) {
+            startSideSwitchRetract(switchTo, actionSide);
+            return true;
+        }
         panelView.setHandleMode();
         if (!clickMode) {
             panelParams.x = panelWindowX();
@@ -1276,6 +1282,36 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
             }
         });
         return true;
+    }
+
+    private void startSideSwitchRetract(String switchTo, String actionSide) {
+        if (retractAnimator != null) {
+            retractAnimator.cancel();
+        }
+        panelView.setMirrored(Prefs.SIDE_LEFT.equals(switchTo));
+        // 收回动画以 settledX 为目标；切换时临时指向新侧，动画结束即重建控制器。
+        settledX = settledXForSide(switchTo);
+        sideSwitchTarget = switchTo;
+        sideSwitchActionSide = actionSide;
+        retract("side_switch");
+    }
+
+    /**
+     * P53：切换左右手不再走 PadService.reloadController()。
+     * reload 的内部顺序是「先 destroy 旧控制器（移除窗口）→ 再 new 新控制器（创建窗口）」，
+     * 两者之间会有一帧**两侧都没有窗口**，用户看到的就是收尾那一下闪黑。
+     * 面板在收回动画结束时已经停在新侧的停靠位、且 mirrored 已按新侧设置，
+     * 所以这里只把逻辑状态对齐，不移动窗口、不重建 —— 逐帧无变化。
+     */
+    private void applySideInPlace(String newSide) {
+        side = newSide;
+        settledX = settledXForSide();
+        panelView.setMirrored(isLeftEdge());
+        panelParams.x = settledX;
+        panelParams.y = settledY;
+        updatePanelLayout(true);
+        log.info("SIDE", "side=" + side + " settledX=" + settledX
+                + " windowW=" + windowWidth + " handleW=" + handleWidth);
     }
 
     private void ensurePullCursorShown(float dx, float dy) {
@@ -1453,6 +1489,12 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
 
     private int settledXForSide() {
         return isLeftEdge()
+                ? -(windowWidth - handleWidth) + edgeInset
+                : Math.max(0, screenWidth - handleWidth - edgeInset);
+    }
+
+    private int settledXForSide(String targetSide) {
+        return Prefs.SIDE_LEFT.equals(targetSide)
                 ? -(windowWidth - handleWidth) + edgeInset
                 : Math.max(0, screenWidth - handleWidth - edgeInset);
     }
@@ -1858,7 +1900,20 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener 
                 panelView.setContentAlpha(1f);
                 panelView.setHandleMode();
                 updatePanelLayout(true);
-                transitionTo(State.SETTLED);
+                if (sideSwitchTarget == null) {
+                    transitionTo(State.SETTLED);
+                } else {
+                    String switchTo = sideSwitchTarget;
+                    String actionSide = sideSwitchActionSide;
+                    sideSwitchTarget = null;
+                    sideSwitchActionSide = null;
+                    prefs.setSide(switchTo);
+                    haptics.tick(Haptics.REASON_TAP_UP);
+                    // P53：原地生效，避免 destroy→create 之间的空窗帧
+                    applySideInPlace(switchTo);
+                    log.info("MENU_ACTION", "action=switch to=" + actionSide + " ok=1");
+                    transitionTo(State.SETTLED);
+                }
             }
         });
         retractAnimator.start();
