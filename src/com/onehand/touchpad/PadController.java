@@ -692,22 +692,24 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         String source = useA11yFallback ? "source=a11y" : "source=shizuku";
         log.info("TASK_SWITCHER", source + " rows=" + rows.length
                 + " fg=" + (foregroundPackage == null ? "none" : foregroundPackage));
-        if (rows.length == 0) {
-            log.info("TASK_SWITCHER", "show=0 reason=no_tasks");
-            return;
+        // 没有应用在跑：抽屉照常弹出，只显示一行提示（用户定的交互），
+        // 不再"静默不弹"。
+        String emptyMessage = rows.length == 0 ? "没有正在运行的应用" : null;
+        if (emptyMessage != null) {
+            log.info("TASK_SWITCHER", "empty=1 reason=no_tasks");
         }
 
         TaskSwitcherView nextView;
         try {
             nextView = new TaskSwitcherView(context, isLeftEdge(), screenWidth,
                     screenHeight, panelParams.y, rows, foregroundPackage,
-                    prefs.getPanelScale());
+                    prefs.getPanelScale(), emptyMessage);
         } catch (Throwable exception) {
             log.warn("TASK_SWITCHER", "show=0 reason=create:"
                     + exception.getClass().getSimpleName());
             return;
         }
-        if (nextView.getTaskCount() == 0) {
+        if (nextView.getTaskCount() == 0 && emptyMessage == null) {
             log.info("TASK_SWITCHER", "show=0 reason=no_installed_tasks");
             return;
         }

@@ -178,11 +178,14 @@ final class TaskSwitcherView extends View {
     private float touchDownY;
     private long openingTime;
     private long openedAtUptime;
+    /** 空态提示（没有应用在跑时显示一行）；null 表示不显示。 */
+    private final String emptyMessage;
 
     TaskSwitcherView(Context context, boolean leftHandle, int screenWidth,
                      int screenHeight, int handleTop, String[] rows,
-                     String foregroundPackage, float scale) {
+                     String foregroundPackage, float scale, String emptyMessage) {
         super(context);
+        this.emptyMessage = emptyMessage;
         this.scale = Math.max(0.1f, scale);
         this.leftHandle = leftHandle;
         this.foregroundPackage = foregroundPackage;
@@ -257,9 +260,12 @@ final class TaskSwitcherView extends View {
 
     private void layoutDrawer(float handleTop) {
         rowsTop = dp(TITLE_TOP_DP + TITLE_LINE_HEIGHT_DP + TITLE_GAP_DP);
+        // 空态：没有行也要占一行的高度，用来放提示文字。
+        int visibleRows = tasks.isEmpty() && emptyMessage != null
+                ? 1 : tasks.size();
         drawerHeight = rowsTop
-                + tasks.size() * rowHeight
-                + Math.max(0, tasks.size() - 1) * dp(ROW_GAP_DP)
+                + visibleRows * rowHeight
+                + Math.max(0, visibleRows - 1) * dp(ROW_GAP_DP)
                 + dp(DRAWER_PADDING_DP);
         float minimumTop = dp(DRAWER_EDGE_GAP_DP);
         float maximumTop = Math.max(minimumTop,
@@ -331,7 +337,9 @@ final class TaskSwitcherView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        if (tasks.isEmpty()) {
+        // 空态（有提示文字）也要把卡片画出来：只有"真的没东西可画"才只铺遮罩。
+        // 真机实测：少了这个条件，空态就只剩整屏变暗、卡片不出现。
+        if (tasks.isEmpty() && emptyMessage == null) {
             canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
             return;
         }
@@ -454,6 +462,24 @@ final class TaskSwitcherView extends View {
         float lineRight = drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP)
                 - dp(ROW_INNER_PADDING_DP);
         float currentTop = drawerTop + rowsTop;
+        if (tasks.isEmpty()) {
+            if (emptyMessage != null) {
+                // 空态：一行提示，和普通行同高同内缩；不可点、不可关、不高亮。
+                rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
+                        drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
+                        currentTop + rowHeight);
+                Paint.FontMetrics emptyMetrics = namePaint.getFontMetrics();
+                namePaint.setTextAlign(Paint.Align.CENTER);
+                namePaint.setColor(SUBTITLE_COLOR);
+                canvas.drawText(emptyMessage, rowRect.centerX(),
+                        rowRect.centerY()
+                                - (emptyMetrics.ascent + emptyMetrics.descent) / 2f,
+                        namePaint);
+                namePaint.setTextAlign(Paint.Align.LEFT);
+                namePaint.setColor(NAME_COLOR);
+            }
+            return;
+        }
         for (int index = 0; index < tasks.size(); index++) {
             TaskRow task = tasks.get(index);
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
