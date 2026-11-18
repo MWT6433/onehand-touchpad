@@ -353,8 +353,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         panelView.setHandleTouchPad(handleTouchPad);
         panelView.setHandleMode();
         panelParams = createPanelParams();
-        // 宽度由 applyHandleWindowGeometry()（手柄态）或 createClickModeHandleParams()
-        // （单击模式）各自写下，这里不再重复写一遍。
+        panelParams.width = windowWidth;
         panelParams.height = windowHeight;
         panelParams.x = panelWindowX();
         panelParams.y = settledY;
@@ -1537,8 +1536,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     private void beginPulling(float rawX, float rawY, float dx, float dy, float pullDistance) {
-        // 面板要从手柄里长出来：先把窗口宽度还原成面板宽度（x 下面按手指重算）。
-        applyPanelWindowGeometry();
         menuShownThisPull = false;
         boolean clickMode = prefs.getClickMode();
         pullClickMode = clickMode;
@@ -1953,26 +1950,19 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     /**
-     * 手柄态的窗口几何：宽度多加 {@link #HANDLE_TOUCH_PAD_DP}，多出来的余量一律
-     * 留在"朝屏幕内侧"那一边，竖条本身的屏幕位置不动（偏移由 PanelView 负责）。
+     * 手柄态的窗口几何：把窗口往"屏幕内侧"挪 {@link #HANDLE_TOUCH_PAD_DP}，
+     * 竖条的屏幕位置由 PanelView 的绘制偏移补回来，所以看起来没动。
+     *
+     * <p>⚠️ 只允许挪窗口，绝不允许改窗口尺寸：P13 真机逐帧结论是，系统会对
+     * updateViewLayout 的宽高变化做过渡动画，拖出面板时会先卡一下再跳（应用层
+     * 零动画代码也挡不住）。所以窗口尺寸从创建起恒定 windowWidth × windowHeight，
+     * 拖出/收回全程只改 x/y。
      */
     private void applyHandleWindowGeometry() {
         if (panelParams == null) {
             return;
         }
-        panelParams.width = windowWidth + handleTouchPad;
-        panelParams.x = settledX - (isLeftEdge() ? 0 : handleTouchPad);
-    }
-
-    /**
-     * 面板态的窗口几何：回到面板自身宽度。面板内容是从窗口 x=0 画的，
-     * 和 panelParams.x 的语义一致，不能再带余量。
-     */
-    private void applyPanelWindowGeometry() {
-        if (panelParams == null) {
-            return;
-        }
-        panelParams.width = windowWidth;
+        panelParams.x = settledX + (isLeftEdge() ? handleTouchPad : -handleTouchPad);
     }
 
     private int settledXForSide() {
@@ -1993,7 +1983,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         return isLeftEdge()
                 ? edgeInset
-                : Math.max(0, screenWidth - handleWidth - edgeInset - handleTouchPad);
+                : Math.max(0, screenWidth - handleWidth - edgeInset);
     }
 
     private float minPanelX() {
