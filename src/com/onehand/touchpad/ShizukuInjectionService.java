@@ -2,6 +2,10 @@
 // Copyright (C) 2026 OneHand Touchpad contributors
 package com.onehand.touchpad;
 
+import android.app.ActivityManager;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
 import android.os.IBinder;
 import android.os.Process;
 import android.os.SystemClock;
@@ -15,6 +19,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 import rikka.shizuku.ShizukuBinderWrapper;
@@ -38,6 +44,7 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
         } catch (Throwable ignored) {
             backend = null;
         }
+        onCreate();
     }
 
     @Override
@@ -346,6 +353,577 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
         String token = value.toLowerCase(Locale.US).trim().replaceAll("[^a-z0-9_.:-]", "_");
         return token.length() <= MAX_ERROR_LENGTH
                 ? token : token.substring(0, MAX_ERROR_LENGTH);
+    }
+
+    private static final int MAX_RECENT_TASKS = 12;
+    private static final int RECENT_TASK_FLAGS = 2;
+    private static final int MAX_TASK_ERROR_LENGTH = 64;
+    private static final String SELF_PACKAGE = "com.onehand.touchpad";
+
+    private void onCreate() {
+        try {
+            log.info("P54A_PROBE", probeTasks());
+        } catch (Throwable exception) {
+            try {
+                log.info("P54A_PROBE", "backend=unavailable|tasks=0|first=none|ms=0"
+                        + "|err=" + shortTaskError(exception));
+            } catch (Throwable ignored) {
+                // The diagnostic probe must not prevent the injection service from starting.
+            }
+        }
+    }
+
+    @Override
+    public String probeTasks() {
+        long startedAt = SystemClock.uptimeMillis();
+        try {
+            TaskQuery query = queryRecentTasks(MAX_RECENT_TASKS);
+            String first = query.rows.isEmpty()
+                    ? "none" : query.rows.get(0).firstSummary();
+            StringBuilder result = new StringBuilder()
+                    .append("backend=").append(query.backendName)
+                    .append("|tasks=").append(query.rows.size())
+                    .append("|first=").append(first)
+                    .append("|ms=").append(SystemClock.uptimeMillis() - startedAt);
+            if (!query.error.isEmpty()) {
+                result.append("|err=").append(query.error);
+            }
+            return result.toString();
+        } catch (Throwable exception) {
+            String reason = shortTaskError(exception);
+            logTaskPath("probe", false, reason);
+            return "backend=unavailable|tasks=0|first=none|ms="
+                    + (SystemClock.uptimeMillis() - startedAt) + "|err=" + reason;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override
+    public String[] listRecentTasks(int maxCount) {
+        int safeMaxCount = Math.max(1, Math.min(maxCount, MAX_RECENT_TASKS));
+        try {
+            TaskQuery query = queryRecentTasks(safeMaxCount);
+            String[] rows = new String[query.rows.size()];
+            for (int i = 0; i < query.rows.size(); i++) {
+                rows[i] = query.rows.get(i).toTabSeparated();
+            }
+            return rows;
+        } catch (Throwable exception) {
+            logTaskPath("list_tasks", false, shortTaskError(exception));
+            return new String[0];
+        }
+    }
+
+    @Override
+    public boolean removeTask(int taskId) {
+        try {
+            if (taskId <= 0) {
+                logTaskPath("remove_task", false, "invalid_task_id");
+                return false;
+            }
+
+            TaskBackend selected = resolveTaskBackend();
+            if (selected.kind != TaskBackendKind.NONE) {
+                try {
+                    boolean removed = removeTaskWithBackend(selected, taskId);
+                    logTaskPath(selected.name + "_remove", removed,
+                            removed ? "" : "not_removed");
+                    return removed;
+                } catch (Throwable exception) {
+                    logTaskPath(selected.name + "_remove", false, shortTaskError(exception));
+                }
+            }
+
+            TaskBackend taskBinder = resolveActivityTaskManagerBackend();
+            if (taskBinder.kind != TaskBackendKind.NONE) {
+                try {
+                    boolean removed = removeTaskWithBackend(taskBinder, taskId);
+                    logTaskPath(taskBinder.name + "_remove", removed,
+                            removed ? "" : "not_removed");
+                    return removed;
+                } catch (Throwable exception) {
+                    logTaskPath(taskBinder.name + "_remove", false,
+                            shortTaskError(exception));
+                }
+            }
+            return false;
+        } catch (Throwable exception) {
+            logTaskPath("remove_task", false, shortTaskError(exception));
+            return false;
+        }
+    }
+
+    @Override
+    public boolean focusTask(int taskId) {
+        try {
+            if (taskId <= 0) {
+                logTaskPath("focus_task", false, "invalid_task_id");
+                return false;
+            }
+
+            TaskBackend selected = resolveTaskBackend();
+            if (selected.kind != TaskBackendKind.NONE) {
+                try {
+                    boolean focused = focusTaskWithBackend(selected, taskId);
+                    logTaskPath(selected.name + "_focus", focused,
+                            focused ? "" : "not_focused");
+                    return focused;
+                } catch (Throwable exception) {
+                    logTaskPath(selected.name + "_focus", false, shortTaskError(exception));
+                }
+            }
+
+            TaskBackend taskBinder = resolveActivityTaskManagerBackend();
+            if (taskBinder.kind != TaskBackendKind.NONE) {
+                try {
+                    boolean focused = focusTaskWithBackend(taskBinder, taskId);
+                    logTaskPath(taskBinder.name + "_focus", focused,
+                            focused ? "" : "not_focused");
+                    return focused;
+                } catch (Throwable exception) {
+                    logTaskPath(taskBinder.name + "_focus", false,
+                            shortTaskError(exception));
+                }
+            }
+            return false;
+        } catch (Throwable exception) {
+            logTaskPath("focus_task", false, shortTaskError(exception));
+            return false;
+        }
+    }
+
+    private TaskQuery queryRecentTasks(int maxCount) {
+        TaskBackend selected = resolveTaskBackend();
+        String failure = selected.error;
+        if (selected.kind != TaskBackendKind.NONE) {
+            try {
+                List<?> tasks = listTasksWithBackend(selected, maxCount);
+                return new TaskQuery(selected.name, toTaskRows(tasks), "");
+            } catch (Throwable exception) {
+                failure = shortTaskError(exception);
+                logTaskPath(selected.name + "_list", false, failure);
+            }
+        }
+
+        TaskBackend taskBinder = resolveActivityTaskManagerBackend();
+        if (taskBinder.kind != TaskBackendKind.NONE) {
+            try {
+                List<?> tasks = listTasksWithBackend(taskBinder, maxCount);
+                return new TaskQuery(taskBinder.name, toTaskRows(tasks), "");
+            } catch (Throwable exception) {
+                failure = shortTaskError(exception);
+                logTaskPath(taskBinder.name + "_list", false, failure);
+            }
+        } else if (!taskBinder.error.isEmpty()) {
+            failure = taskBinder.error;
+        }
+
+        String reportedBackend = selected.kind == TaskBackendKind.NONE
+                ? "unavailable" : selected.name;
+        return new TaskQuery(reportedBackend, new ArrayList<TaskRow>(), failure);
+    }
+
+    private TaskBackend resolveTaskBackend() {
+        String lastError = "no_task_backend";
+
+        try {
+            Object application = currentApplication();
+            ActivityManager manager = activityManagerFrom(application);
+            logTaskPath("application", true, "");
+            return new TaskBackend(TaskBackendKind.ACTIVITY_MANAGER,
+                    "application", manager, "");
+        } catch (Throwable exception) {
+            lastError = shortTaskError(exception);
+            logTaskPath("application", false, lastError);
+        }
+
+        try {
+            Object activityThread = currentActivityThread();
+            if (activityThread == null) {
+                throw new IllegalStateException("activity_thread_null");
+            }
+            Method getSystemContext = activityThread.getClass()
+                    .getDeclaredMethod("getSystemContext");
+            getSystemContext.setAccessible(true);
+            Object systemContext = getSystemContext.invoke(activityThread);
+            ActivityManager manager = activityManagerFrom(systemContext);
+            logTaskPath("system_context", true, "");
+            return new TaskBackend(TaskBackendKind.ACTIVITY_MANAGER,
+                    "system_context", manager, "");
+        } catch (Throwable exception) {
+            lastError = shortTaskError(exception);
+            logTaskPath("system_context", false, lastError);
+        }
+
+        try {
+            TaskBackend binder = resolveBinderInterface(
+                    "binder", "android.app.IActivityManager",
+                    "android.app.IActivityManager$Stub");
+            logTaskPath("binder", true, "");
+            return binder;
+        } catch (Throwable exception) {
+            lastError = shortTaskError(exception);
+            logTaskPath("binder", false, lastError);
+        }
+
+        return new TaskBackend(TaskBackendKind.NONE, "unavailable", null, lastError);
+    }
+
+    private TaskBackend resolveActivityTaskManagerBackend() {
+        try {
+            TaskBackend taskBackend = resolveBinderInterface(
+                    "binder_task", "android.app.IActivityTaskManager",
+                    "android.app.IActivityTaskManager$Stub");
+            logTaskPath("binder_task", true, "");
+            return taskBackend;
+        } catch (Throwable exception) {
+            String reason = shortTaskError(exception);
+            logTaskPath("binder_task", false, reason);
+            return new TaskBackend(TaskBackendKind.NONE, "unavailable", null, reason);
+        }
+    }
+
+    private static Object currentApplication() throws Exception {
+        Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+        Method currentApplication = activityThreadClass.getDeclaredMethod("currentApplication");
+        currentApplication.setAccessible(true);
+        return currentApplication.invoke(null);
+    }
+
+    private static Object currentActivityThread() throws Exception {
+        Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+        Method currentActivityThread =
+                activityThreadClass.getDeclaredMethod("currentActivityThread");
+        currentActivityThread.setAccessible(true);
+        return currentActivityThread.invoke(null);
+    }
+
+    private static ActivityManager activityManagerFrom(Object context) {
+        if (!(context instanceof Context)) {
+            throw new IllegalStateException("context_unavailable");
+        }
+        Object service = ((Context) context).getSystemService(Context.ACTIVITY_SERVICE);
+        if (!(service instanceof ActivityManager)) {
+            throw new IllegalStateException("activity_manager_unavailable");
+        }
+        return (ActivityManager) service;
+    }
+
+    private static TaskBackend resolveBinderInterface(
+            String name, String interfaceClass, String stubClass) throws Exception {
+        IBinder binder = getServiceBinder("activity");
+        String descriptor = binder.getInterfaceDescriptor();
+        if (!interfaceClass.equals(descriptor)) {
+            throw new IllegalStateException("descriptor_" + descriptor);
+        }
+        Class<?> stub = Class.forName(stubClass);
+        Method asInterface = stub.getDeclaredMethod("asInterface", IBinder.class);
+        asInterface.setAccessible(true);
+        Object receiver = asInterface.invoke(null, new ShizukuBinderWrapper(binder));
+        if (receiver == null) {
+            throw new IllegalStateException("null_binder_interface");
+        }
+        return new TaskBackend(TaskBackendKind.BINDER, name, receiver, "");
+    }
+
+    private static IBinder getServiceBinder(String serviceName) throws Exception {
+        Class<?> serviceManagerClass = Class.forName("android.os.ServiceManager");
+        Method getService = serviceManagerClass.getDeclaredMethod(
+                "getService", String.class);
+        getService.setAccessible(true);
+        IBinder binder = (IBinder) getService.invoke(null, serviceName);
+        if (binder == null) {
+            throw new IllegalStateException("null_activity_service");
+        }
+        return binder;
+    }
+
+    @SuppressWarnings("deprecation")
+    private static List<?> listTasksWithBackend(TaskBackend backend, int maxCount)
+            throws Exception {
+        if (backend.kind == TaskBackendKind.ACTIVITY_MANAGER) {
+            List<ActivityManager.RecentTaskInfo> tasks =
+                    ((ActivityManager) backend.receiver).getRecentTasks(
+                            maxCount, RECENT_TASK_FLAGS);
+            if (tasks == null) {
+                throw new IllegalStateException("null_recent_tasks");
+            }
+            return tasks;
+        }
+
+        Object result;
+        try {
+            result = invokeMatching(backend.receiver, "getRecentTasks",
+                    Integer.valueOf(maxCount), Integer.valueOf(RECENT_TASK_FLAGS),
+                    Integer.valueOf(0));
+        } catch (NoSuchMethodException absentThreeArgumentOverload) {
+            result = invokeMatching(backend.receiver, "getRecentTasks",
+                    Integer.valueOf(maxCount), Integer.valueOf(RECENT_TASK_FLAGS));
+        }
+        return unwrapTaskList(result);
+    }
+
+    private static boolean removeTaskWithBackend(TaskBackend backend, int taskId)
+            throws Exception {
+        // ActivityManager.removeTask(int) 在运行时存在但不在编译期 SDK stub 里（API 21 起被移出公开面），
+        // 直接调用会 "找不到符号"，因此两条后端都走反射。
+        Object result = invokeMatching(backend.receiver, "removeTask",
+                Integer.valueOf(taskId));
+        if (!(result instanceof Boolean)) {
+            throw new IllegalStateException("remove_result_not_boolean");
+        }
+        return (Boolean) result;
+    }
+
+    private static boolean focusTaskWithBackend(TaskBackend backend, int taskId)
+            throws Exception {
+        if (backend.kind == TaskBackendKind.ACTIVITY_MANAGER) {
+            ((ActivityManager) backend.receiver).moveTaskToFront(taskId, 0);
+            return true;
+        }
+        Object result = invokeMatching(backend.receiver, "startActivityFromRecents",
+                Integer.valueOf(taskId), (Object) null);
+        if (result instanceof Boolean) {
+            return (Boolean) result;
+        }
+        if (result instanceof Number) {
+            return ((Number) result).intValue() == 0;
+        }
+        return true;
+    }
+
+    private static List<?> unwrapTaskList(Object value) throws Exception {
+        if (value instanceof List) {
+            return (List<?>) value;
+        }
+        if (value == null) {
+            throw new IllegalStateException("null_recent_tasks");
+        }
+        Object list = invokeMatching(value, "getList");
+        if (!(list instanceof List)) {
+            throw new IllegalStateException("recent_tasks_not_list");
+        }
+        return (List<?>) list;
+    }
+
+    private List<TaskRow> toTaskRows(List<?> tasks) {
+        List<TaskRow> rows = new ArrayList<>();
+        Field lastActiveTimeField = resolveLastActiveTimeField();
+        for (Object value : tasks) {
+            if (!(value instanceof ActivityManager.RecentTaskInfo)) {
+                logTaskPath("task_row", false, "not_recent_task_info");
+                continue;
+            }
+            ActivityManager.RecentTaskInfo task =
+                    (ActivityManager.RecentTaskInfo) value;
+            int taskId = task.taskId;
+            if (taskId <= 0) {
+                continue;
+            }
+
+            ComponentName top = task.topActivity;
+            String packageName = taskPackageName(task, top);
+            if (SELF_PACKAGE.equals(packageName) || isHomeTask(task)) {
+                continue;
+            }
+            String topActivity = top == null
+                    ? packageName + "/?" : top.flattenToShortString();
+            long lastActiveTime = lastActiveTime(task, lastActiveTimeField);
+            String flags = rows.isEmpty() ? "foreground" : "background";
+            rows.add(new TaskRow(taskId, packageName, topActivity,
+                    lastActiveTime, flags));
+        }
+        return rows;
+    }
+
+    private Field resolveLastActiveTimeField() {
+        try {
+            return ActivityManager.RecentTaskInfo.class.getField("lastActiveTime");
+        } catch (Throwable exception) {
+            logTaskPath("last_active_time", false, shortTaskError(exception));
+            return null;
+        }
+    }
+
+    private long lastActiveTime(
+            ActivityManager.RecentTaskInfo task, Field lastActiveTimeField) {
+        if (lastActiveTimeField == null) {
+            return 0L;
+        }
+        try {
+            return lastActiveTimeField.getLong(task);
+        } catch (Throwable exception) {
+            logTaskPath("last_active_time", false, shortTaskError(exception));
+            return 0L;
+        }
+    }
+
+    private static String taskPackageName(
+            ActivityManager.RecentTaskInfo task, ComponentName top) {
+        if (top != null) {
+            return top.getPackageName();
+        }
+        if (task.baseActivity != null) {
+            return task.baseActivity.getPackageName();
+        }
+        if (task.baseIntent != null && task.baseIntent.getComponent() != null) {
+            return task.baseIntent.getComponent().getPackageName();
+        }
+        return "unknown";
+    }
+
+    private static boolean isHomeTask(ActivityManager.RecentTaskInfo task) {
+        Intent intent = task.baseIntent;
+        return intent != null && intent.hasCategory(Intent.CATEGORY_HOME);
+    }
+
+    private static Object invokeMatching(
+            Object receiver, String methodName, Object... arguments) throws Exception {
+        Method method = findCompatibleMethod(receiver.getClass(), methodName, arguments);
+        method.setAccessible(true);
+        return method.invoke(receiver, arguments);
+    }
+
+    private static Method findCompatibleMethod(
+            Class<?> targetClass, String methodName, Object... arguments)
+            throws NoSuchMethodException {
+        for (Method method : targetClass.getMethods()) {
+            if (!methodName.equals(method.getName())
+                    || method.getParameterTypes().length != arguments.length) {
+                continue;
+            }
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            boolean compatible = true;
+            for (int i = 0; i < parameterTypes.length; i++) {
+                if (!acceptsArgument(parameterTypes[i], arguments[i])) {
+                    compatible = false;
+                    break;
+                }
+            }
+            if (compatible) {
+                return method;
+            }
+        }
+        throw new NoSuchMethodException(
+                "no_method_" + methodName + "_" + arguments.length);
+    }
+
+    private static boolean acceptsArgument(Class<?> parameterType, Object argument) {
+        if (!parameterType.isPrimitive()) {
+            return argument == null || parameterType.isInstance(argument);
+        }
+        if (argument == null) {
+            return false;
+        }
+        if (parameterType == int.class) {
+            return argument instanceof Integer;
+        }
+        if (parameterType == long.class) {
+            return argument instanceof Long;
+        }
+        if (parameterType == boolean.class) {
+            return argument instanceof Boolean;
+        }
+        return false;
+    }
+
+    private void logTaskPath(String path, boolean ok, String error) {
+        try {
+            log.info("P54A_TASK_PATH", "path=" + path + " ok=" + (ok ? 1 : 0)
+                    + " err=" + shortTaskErrorText(error));
+        } catch (Throwable ignored) {
+            // Task diagnostics must not affect the injection backend.
+        }
+    }
+
+    private static String shortTaskError(Throwable throwable) {
+        Throwable cause = throwable;
+        while (cause instanceof InvocationTargetException
+                && ((InvocationTargetException) cause).getCause() != null) {
+            cause = ((InvocationTargetException) cause).getCause();
+        }
+        if (cause == null) {
+            return "unknown";
+        }
+        String message = cause.getMessage();
+        String className = cause.getClass().getSimpleName();
+        String result = message == null || message.trim().isEmpty()
+                ? className : className + ":" + message.trim();
+        return shortTaskErrorText(result);
+    }
+
+    private static String shortTaskErrorText(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return "";
+        }
+        String result = value.trim().replaceAll("[\\s|]+", "_");
+        return result.length() <= MAX_TASK_ERROR_LENGTH
+                ? result : result.substring(0, MAX_TASK_ERROR_LENGTH);
+    }
+
+    private enum TaskBackendKind {
+        NONE,
+        ACTIVITY_MANAGER,
+        BINDER
+    }
+
+    private static final class TaskBackend {
+        final TaskBackendKind kind;
+        final String name;
+        final Object receiver;
+        final String error;
+
+        TaskBackend(TaskBackendKind kind, String name, Object receiver, String error) {
+            this.kind = kind;
+            this.name = name;
+            this.receiver = receiver;
+            this.error = error == null ? "" : error;
+        }
+    }
+
+    private static final class TaskQuery {
+        final String backendName;
+        final List<TaskRow> rows;
+        final String error;
+
+        TaskQuery(String backendName, List<TaskRow> rows, String error) {
+            this.backendName = backendName;
+            this.rows = rows;
+            this.error = error == null ? "" : error;
+        }
+    }
+
+    private static final class TaskRow {
+        final String taskId;
+        final String packageName;
+        final String topActivity;
+        final String lastActiveTimeMs;
+        final String flags;
+
+        TaskRow(int taskId, String packageName, String topActivity,
+                long lastActiveTimeMs, String flags) {
+            this.taskId = Integer.toString(taskId);
+            this.packageName = cleanTaskField(packageName, "unknown");
+            this.topActivity = cleanTaskField(topActivity, "unknown");
+            this.lastActiveTimeMs = Long.toString(lastActiveTimeMs);
+            this.flags = cleanTaskField(flags, "background");
+        }
+
+        String firstSummary() {
+            return packageName + "#" + taskId;
+        }
+
+        String toTabSeparated() {
+            return taskId + "\t" + packageName + "\t" + topActivity + "\t"
+                    + lastActiveTimeMs + "\t" + flags;
+        }
+
+        private static String cleanTaskField(String value, String fallback) {
+            if (value == null || value.isEmpty()) {
+                return fallback;
+            }
+            return value.replace('\t', '_').replace('\n', '_').replace('\r', '_');
+        }
     }
 
     private static final class Backend {
