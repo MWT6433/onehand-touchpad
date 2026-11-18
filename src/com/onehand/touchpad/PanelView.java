@@ -34,7 +34,8 @@ final class PanelView extends View {
 
     // P49：面板灰面再加深、透明度再降低，箭头不再依赖黑块或圆形底。
     static final float HAIRLINE_DP = 0.35f;
-    private static final int PANEL_SURFACE = 0x665E5E5E;
+    // 包内可见：任务抽屉（TaskSwitcherView）直接引用同一个灰面，两边永远同色。
+    static final int PANEL_SURFACE = 0x665E5E5E;
     private static final int PANEL_SURFACE_ADJUST = 0x4D3070E8;
     static final int FRAME_OUTER = 0x3D000000;
     static final int FRAME_INNER = 0x4DFFFFFF;

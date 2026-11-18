@@ -94,7 +94,9 @@ final class TaskSwitcherView extends View {
     private static final float TASK_CLOSE_LINE_DP = 1.6f;
 
     private static final int SCRIM_COLOR = 0x990C0C0E;
-    private static final int DRAWER_COLOR = 0xEC5E5E5E;
+    // 和拖出来的面板同一个灰面（用户要求同步）：原来这里是独一份的 0xEC5E5E5E，
+    // 92% 不透明，和面板的 40% 灰面完全不是一个观感。直接引用，避免以后各改各的。
+    private static final int DRAWER_COLOR = PanelView.PANEL_SURFACE;
     private static final int OUTER_STROKE_COLOR = 0xFF000000;
     private static final int INNER_STROKE_COLOR = 0x57FFFFFF;
     /**
