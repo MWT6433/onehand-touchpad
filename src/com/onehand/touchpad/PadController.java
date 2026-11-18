@@ -1769,7 +1769,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         side = newSide;
         settledX = settledXForSide();
         panelView.setMirrored(isLeftEdge());
-        panelParams.x = settledX;
+        // ⚠️ 必须走具名几何：手柄态的窗口比停靠位内移了 HANDLE_TOUCH_PAD_DP，
+        // 直接写 settledX 会让竖条沉进屏幕边缘半个手指宽（P76b 真机踩过）。
+        applyHandleWindowGeometry();
         panelParams.y = settledY;
         updatePanelLayout(true);
         log.info("SIDE", "side=" + side + " settledX=" + settledX
