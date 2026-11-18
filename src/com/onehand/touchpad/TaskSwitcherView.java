@@ -19,11 +19,15 @@ import android.view.ViewConfiguration;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 final class TaskSwitcherView extends View {
     interface Listener {
         void onTaskSelected(int taskId);
+
+        boolean onTaskRemoveRequested(int taskId);
 
         void onDismissRequested();
     }
@@ -43,16 +47,24 @@ final class TaskSwitcherView extends View {
     private static final int DRAWER_PADDING_DP = 12;
     private static final int ROW_INNER_PADDING_DP = 12;
     private static final int ROW_ACTION_RESERVE_DP = 20;
+    private static final int TASK_CLOSE_SIZE_DP = 30;
+    private static final int TASK_CLOSE_TOUCH_DP = 44;
+    private static final int TASK_CLOSE_EDGE_DP = 26;
+    private static final int TASK_CLOSE_MARK_DP = 10;
     private static final int TITLE_TOP_DP = 14;
     private static final int TITLE_LINE_HEIGHT_DP = 16;
     private static final int TITLE_GAP_DP = 6;
     private static final int TEXT_GAP_DP = 12;
     private static final int TEXT_LINE_GAP_DP = 2;
     private static final int ICON_CACHE_LIMIT = 16;
+    private static final long SUBTITLE_MAX_AGE_MS =
+            365L * 24L * 60L * 60L * 1000L;
     private static final float TITLE_SIZE_SP = 11f;
     private static final float NAME_SIZE_SP = 15f;
     private static final float SUBTITLE_SIZE_SP = 11f;
     private static final float INNER_STROKE_DP = 0.35f;
+    private static final float TASK_CLOSE_STROKE_DP = 1.5f;
+    private static final float TASK_CLOSE_LINE_DP = 2f;
 
     private static final int SCRIM_COLOR = 0x6E0C0C0E;
     private static final int DRAWER_COLOR = 0x665E5E5E;
@@ -63,6 +75,8 @@ final class TaskSwitcherView extends View {
     private static final int NAME_COLOR = 0xFFFFFFFF;
     private static final int SUBTITLE_COLOR = 0x9EFFFFFF;
     private static final int FALLBACK_ICON_COLOR = 0xFF6B6B70;
+    private static final int TASK_CLOSE_STROKE_COLOR = 0x6BFFFFFF;
+    private static final int TASK_CLOSE_MARK_COLOR = 0xDBFFFFFF;
 
     private static final HashMap<String, Bitmap> ICON_CACHE = new HashMap<>();
     private static final ArrayList<String> ICON_ORDER = new ArrayList<>();
@@ -78,6 +92,8 @@ final class TaskSwitcherView extends View {
     private final float rowCorner;
     private final float drawerCorner;
     private final float innerStrokeWidth;
+    private final float closeSize;
+    private final float closeTouchSize;
     private final float touchSlop;
     private final RectF drawerRect = new RectF();
     private final RectF rowRect = new RectF();
@@ -94,6 +110,8 @@ final class TaskSwitcherView extends View {
     private final Paint subtitlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fallbackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint closeCirclePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint closeLinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final List<TaskRow> tasks = new ArrayList<>();
 
     private Listener listener;
@@ -121,6 +139,8 @@ final class TaskSwitcherView extends View {
         this.rowCorner = dp(ROW_CORNER_DP);
         this.drawerCorner = dp(DRAWER_CORNER_DP);
         this.innerStrokeWidth = Math.max(1f, INNER_STROKE_DP * density());
+        this.closeSize = dp(TASK_CLOSE_SIZE_DP);
+        this.closeTouchSize = dp(TASK_CLOSE_TOUCH_DP);
         this.touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         loadTasks(rows);
 
@@ -131,17 +151,7 @@ final class TaskSwitcherView extends View {
         drawerLeft = leftHandle
                 ? dp(DRAWER_EDGE_DP)
                 : Math.max(0f, screenWidth - drawerWidth - dp(DRAWER_EDGE_DP));
-        rowsTop = dp(TITLE_TOP_DP + TITLE_LINE_HEIGHT_DP + TITLE_GAP_DP);
-        drawerHeight = rowsTop
-                + tasks.size() * rowHeight
-                + Math.max(0, tasks.size() - 1) * dp(ROW_GAP_DP)
-                + dp(DRAWER_PADDING_DP);
-        float minimumTop = dp(DRAWER_EDGE_GAP_DP);
-        float maximumTop = Math.max(minimumTop,
-                screenHeight - drawerHeight - dp(DRAWER_EDGE_GAP_DP));
-        drawerTop = clamp(handleTop, minimumTop, maximumTop);
-        drawerRect.set(drawerLeft, drawerTop,
-                drawerLeft + drawerWidth, drawerTop + drawerHeight);
+        layoutDrawer(handleTop);
 
         scrimPaint.setStyle(Paint.Style.FILL);
         scrimPaint.setColor(SCRIM_COLOR);
@@ -154,6 +164,13 @@ final class TaskSwitcherView extends View {
         innerStrokePaint.setStrokeWidth(innerStrokeWidth);
         innerStrokePaint.setColor(INNER_STROKE_COLOR);
         rowPaint.setStyle(Paint.Style.FILL);
+        closeCirclePaint.setStyle(Paint.Style.STROKE);
+        closeCirclePaint.setStrokeWidth(dp(TASK_CLOSE_STROKE_DP));
+        closeCirclePaint.setColor(TASK_CLOSE_STROKE_COLOR);
+        closeLinePaint.setStyle(Paint.Style.STROKE);
+        closeLinePaint.setStrokeWidth(dp(TASK_CLOSE_LINE_DP));
+        closeLinePaint.setStrokeCap(Paint.Cap.ROUND);
+        closeLinePaint.setColor(TASK_CLOSE_MARK_COLOR);
         titlePaint.setTextSize(sp(TITLE_SIZE_SP));
         titlePaint.setColor(TITLE_COLOR);
         titlePaint.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
@@ -173,6 +190,20 @@ final class TaskSwitcherView extends View {
         setClickable(true);
         setFocusable(true);
         setContentDescription("最近使用任务");
+    }
+
+    private void layoutDrawer(float handleTop) {
+        rowsTop = dp(TITLE_TOP_DP + TITLE_LINE_HEIGHT_DP + TITLE_GAP_DP);
+        drawerHeight = rowsTop
+                + tasks.size() * rowHeight
+                + Math.max(0, tasks.size() - 1) * dp(ROW_GAP_DP)
+                + dp(DRAWER_PADDING_DP);
+        float minimumTop = dp(DRAWER_EDGE_GAP_DP);
+        float maximumTop = Math.max(minimumTop,
+                screenHeight - drawerHeight - dp(DRAWER_EDGE_GAP_DP));
+        drawerTop = clamp(handleTop, minimumTop, maximumTop);
+        drawerRect.set(drawerLeft, drawerTop,
+                drawerLeft + drawerWidth, drawerTop + drawerHeight);
     }
 
     void setListener(Listener listener) {
@@ -236,15 +267,19 @@ final class TaskSwitcherView extends View {
         float textLeft;
         float textRight;
         if (leftHandle) {
+            float closeTouchRight = taskCloseCenterX() + closeTouchSize / 2f;
+            contentRight = Math.max(
+                    contentLeft + iconSize,
+                    closeTouchRight + dp(TEXT_GAP_DP) + iconSize);
             iconLeft = contentRight - iconSize;
-            textLeft = contentLeft + dp(ROW_ACTION_RESERVE_DP);
-            textRight = iconLeft - dp(TEXT_GAP_DP);
+            textLeft = contentRight + dp(TEXT_GAP_DP);
+            textRight = row.right - dp(ROW_INNER_PADDING_DP);
             namePaint.setTextAlign(Paint.Align.RIGHT);
             subtitlePaint.setTextAlign(Paint.Align.RIGHT);
         } else {
             iconLeft = contentLeft;
             textLeft = iconLeft + iconSize + dp(TEXT_GAP_DP);
-            textRight = contentRight - dp(ROW_ACTION_RESERVE_DP);
+            textRight = taskCloseCenterX() - closeSize / 2f - dp(TEXT_GAP_DP);
             namePaint.setTextAlign(Paint.Align.LEFT);
             subtitlePaint.setTextAlign(Paint.Align.LEFT);
         }
@@ -254,31 +289,66 @@ final class TaskSwitcherView extends View {
         if (leftHandle) {
             drawTaskText(canvas, task, textLeft, textRight, row);
             drawTaskIcon(canvas, task, iconLeft, iconTop);
+            drawTaskClose(canvas, row);
         } else {
             drawTaskIcon(canvas, task, iconLeft, iconTop);
             drawTaskText(canvas, task, textLeft, textRight, row);
+            drawTaskClose(canvas, row);
         }
+    }
+
+    private void drawTaskClose(Canvas canvas, RectF row) {
+        float centerX = taskCloseCenterX();
+        float centerY = row.centerY();
+        canvas.drawCircle(centerX, centerY, closeSize / 2f, closeCirclePaint);
+        float markRadius = dp(TASK_CLOSE_MARK_DP) / 2f;
+        canvas.drawLine(centerX - markRadius, centerY - markRadius,
+                centerX + markRadius, centerY + markRadius, closeLinePaint);
+        canvas.drawLine(centerX - markRadius, centerY + markRadius,
+                centerX + markRadius, centerY - markRadius, closeLinePaint);
+    }
+
+    private float taskCloseCenterX() {
+        return leftHandle
+                ? drawerLeft + dp(TASK_CLOSE_EDGE_DP)
+                : drawerLeft + drawerWidth - dp(TASK_CLOSE_EDGE_DP);
     }
 
     private void drawTaskText(Canvas canvas, TaskRow task,
                               float textLeft, float textRight, RectF row) {
         float textWidth = Math.max(0f, textRight - textLeft);
         String name = ellipsize(namePaint, task.label, textWidth);
+        float nameX = leftHandle
+                ? Math.min(textRight, textLeft + namePaint.measureText(name))
+                : textLeft;
+        long nowMs = System.currentTimeMillis();
+        boolean noSubtitle = task.lastActiveTimeMs <= 0L
+                || nowMs - task.lastActiveTimeMs > SUBTITLE_MAX_AGE_MS;
+        if (noSubtitle) {
+            Paint.FontMetrics nameMetrics = namePaint.getFontMetrics();
+            float nameBaseline = row.centerY()
+                    - (nameMetrics.ascent + nameMetrics.descent) / 2f;
+            canvas.drawText(name, nameX, nameBaseline, namePaint);
+            return;
+        }
         String subtitle = ellipsize(
                 subtitlePaint, relativeTime(task.lastActiveTimeMs,
-                        System.currentTimeMillis()), textWidth);
+                        nowMs), textWidth);
         Paint.FontMetrics nameMetrics = namePaint.getFontMetrics();
         Paint.FontMetrics subtitleMetrics = subtitlePaint.getFontMetrics();
         float nameHeight = nameMetrics.descent - nameMetrics.ascent;
         float subtitleHeight = subtitleMetrics.descent - subtitleMetrics.ascent;
         float blockHeight = nameHeight + dp(TEXT_LINE_GAP_DP) + subtitleHeight;
         float blockTop = row.centerY() - blockHeight / 2f;
-        float textX = leftHandle ? textRight : textLeft;
         float nameBaseline = blockTop - nameMetrics.ascent;
         float subtitleTop = blockTop + nameHeight + dp(TEXT_LINE_GAP_DP);
         float subtitleBaseline = subtitleTop - subtitleMetrics.ascent;
-        canvas.drawText(name, textX, nameBaseline, namePaint);
-        canvas.drawText(subtitle, textX, subtitleBaseline, subtitlePaint);
+        float subtitleX = leftHandle
+                ? Math.min(textRight,
+                        textLeft + subtitlePaint.measureText(subtitle))
+                : textLeft;
+        canvas.drawText(name, nameX, nameBaseline, namePaint);
+        canvas.drawText(subtitle, subtitleX, subtitleBaseline, subtitlePaint);
     }
 
     private void drawTaskIcon(Canvas canvas, TaskRow task, float iconLeft,
@@ -308,10 +378,8 @@ final class TaskSwitcherView extends View {
         if (rows == null) {
             return;
         }
+        Set<String> seenPackages = new HashSet<>();
         for (String raw : rows) {
-            if (tasks.size() >= MAX_ROWS) {
-                break;
-            }
             if (raw == null) {
                 continue;
             }
@@ -330,6 +398,13 @@ final class TaskSwitcherView extends View {
             String packageName = fields[1].trim();
             if (taskId <= 0 || packageName.isEmpty()) {
                 continue;
+            }
+            if (seenPackages.contains(packageName)) {
+                continue;
+            }
+            seenPackages.add(packageName);
+            if (tasks.size() >= MAX_ROWS) {
+                break;
             }
             String label;
             try {
@@ -433,6 +508,13 @@ final class TaskSwitcherView extends View {
         if (listener == null) {
             return;
         }
+        TaskRow closeTask = closeTaskAt(x, y);
+        if (closeTask != null) {
+            if (listener.onTaskRemoveRequested(closeTask.taskId)) {
+                removeTaskRow(closeTask);
+            }
+            return;
+        }
         TaskRow row = taskAt(x, y);
         if (row != null) {
             listener.onTaskSelected(row.taskId);
@@ -441,18 +523,57 @@ final class TaskSwitcherView extends View {
         }
     }
 
+    private TaskRow closeTaskAt(float x, float y) {
+        float currentTop = drawerTop + rowsTop;
+        for (TaskRow task : tasks) {
+            rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
+                    drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
+                    currentTop + rowHeight);
+            if (taskCloseHit(rowRect, x, y)) {
+                return task;
+            }
+            currentTop += rowHeight + dp(ROW_GAP_DP);
+        }
+        return null;
+    }
+
     private TaskRow taskAt(float x, float y) {
         float currentTop = drawerTop + rowsTop;
         for (TaskRow task : tasks) {
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
                     currentTop + rowHeight);
-            if (rowRect.contains(x, y)) {
+            if (taskRowHit(rowRect, x, y)) {
                 return task;
             }
             currentTop += rowHeight + dp(ROW_GAP_DP);
         }
         return null;
+    }
+
+    private boolean taskCloseHit(RectF row, float x, float y) {
+        float centerX = taskCloseCenterX();
+        float halfTouch = closeTouchSize / 2f;
+        return x >= centerX - halfTouch
+                && x <= centerX + halfTouch
+                && y >= row.centerY() - halfTouch
+                && y <= row.centerY() + halfTouch;
+    }
+
+    private boolean taskRowHit(RectF row, float x, float y) {
+        return row.contains(x, y) && !taskCloseHit(row, x, y);
+    }
+
+    private void removeTaskRow(TaskRow task) {
+        tasks.remove(task);
+        if (tasks.isEmpty()) {
+            if (listener != null) {
+                listener.onDismissRequested();
+            }
+            return;
+        }
+        layoutDrawer(drawerTop);
+        invalidate();
     }
 
     static String relativeTime(long lastActiveTimeMs, long nowMs) {

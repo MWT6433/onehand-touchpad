@@ -742,6 +742,27 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     @Override
+    public boolean onTaskRemoveRequested(int taskId) {
+        ShizukuInjector shizukuInjector = shizukuInjector();
+        boolean ok = false;
+        String reason = "no_shizuku";
+        try {
+            if (shizukuInjector != null) {
+                ok = shizukuInjector.removeTask(taskId);
+                reason = ok ? "none" : "remove_failed";
+            }
+        } catch (Throwable exception) {
+            reason = exception.getClass().getSimpleName();
+        }
+        log.info("TASK_REMOVE", "ok=" + (ok ? 1 : 0)
+                + " taskId=" + taskId + " reason=" + reason);
+        if (!ok) {
+            haptics.tick(Haptics.REASON_TAP_UP);
+        }
+        return ok;
+    }
+
+    @Override
     public void onDismissRequested() {
         hideTaskSwitcher("outside");
     }

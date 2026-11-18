@@ -635,6 +635,32 @@ final class ShizukuInjector implements Injector {
         }
     }
 
+    /** 移除指定任务；任务 ID 非法、通道不可用或远端失败时返回 false。 */
+    boolean removeTask(int taskId) {
+        if (taskId <= 0) {
+            log.warn("TASK_REMOVE", "ok=0 reason=invalid_task_id");
+            return false;
+        }
+        String reason = unavailableReason();
+        if (reason != null) {
+            log.warn("TASK_REMOVE", "ok=0 reason=" + reason);
+            return false;
+        }
+        IInjectionApi current = api;
+        try {
+            boolean removed = current.removeTask(taskId);
+            log.info("TASK_REMOVE", "ok=" + (removed ? 1 : 0)
+                    + " taskId=" + taskId
+                    + (removed ? "" : " reason=service_false"));
+            return removed;
+        } catch (Throwable exception) {
+            api = null;
+            log.warn("TASK_REMOVE", "ok=0 taskId=" + taskId
+                    + " reason=" + exceptionReason(exception));
+            return false;
+        }
+    }
+
     private String fallbackReason() {
         if (destroyed) {
             return null;
