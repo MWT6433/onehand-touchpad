@@ -680,7 +680,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                         + exception.getClass().getSimpleName());
             }
         }
-        if (rows == null || rows.length == 0) {
+        if (rows == null) {
+            // 只有"查不到"才回退（Shizuku 未连接/异常）。查到了但是空的，说明确实没有
+            // 还在运行的任务——这时拿无障碍记的"最近前台包"凑数，会让已经不在最近任务里
+            // 的应用重新冒出来（真机实测：清空最近任务后仍列出 5 个），与"只列还在跑的"
+            // 自相矛盾。
             useA11yFallback = true;
             rows = service == null
                     ? new String[0] : service.recentForegroundPackageRows();
