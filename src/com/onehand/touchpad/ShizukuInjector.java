@@ -604,6 +604,74 @@ final class ShizukuInjector implements Injector {
         return false;
     }
 
+    /**
+     * 当前真正在前台的包（实时查询）。无障碍的 TYPE_WINDOW_STATE_CHANGED 会漏：
+     * 下拉通知栏再收起、从最近任务切回同一个应用，都不一定再发一次事件，
+     * 抽屉就会以为"没有当前应用"而不画蓝框。这里让 Shizuku 跑一次
+     * {@code dumpsys activity activities} 取 topResumedActivity，异步回填。
+     *
+     * <p>必须放在后台线程调用（几十到几百毫秒）。
+     */
+    static String topResumedPackage() {
+        if (!Shizuku.pingBinder()) {
+            return null;
+        }
+        if (Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return null;
+        }
+        Process process = null;
+        try {
+            // Shizuku.newProcess 在 API jar 里是 private（只有 ShizukuRemoteProcess
+            // 构造器可见但要在同包），只能反射调；这是库类、不受隐藏 API 限制。
+            java.lang.reflect.Method factory = Shizuku.class.getDeclaredMethod(
+                    "newProcess", String[].class, String[].class, String.class);
+            factory.setAccessible(true);
+            process = (Process) factory.invoke(null, (Object) new String[] {
+                    "sh", "-c", "dumpsys activity activities | grep -m1 topResumedActivity"},
+                    null, null);
+            java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(process.getInputStream(), "UTF-8"));
+            String line = reader.readLine();
+            reader.close();
+            String parsed = parseResumedPackage(line);
+            if (parsed != null) {
+                return parsed;
+            }
+        } catch (Throwable ignored) {
+            // Shizuku 掉线、被拒、dumpsys 超时：交给调用方的无障碍兜底。
+        } finally {
+            if (process != null) {
+                try {
+                    process.destroy();
+                } catch (Throwable ignored) {
+                    // 进程已经退出。
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 从 "topResumedActivity=ActivityRecord{... u0 com.foo/bar ...}" 里取包名。 */
+    static String parseResumedPackage(String line) {
+        if (line == null) {
+            return null;
+        }
+        int at = line.indexOf(" u");
+        if (at < 0) {
+            return null;
+        }
+        int start = line.indexOf(' ', at + 1);
+        if (start < 0) {
+            return null;
+        }
+        int end = line.indexOf('/', start + 1);
+        if (end <= start) {
+            return null;
+        }
+        String pkg = line.substring(start + 1, end).trim();
+        return pkg.isEmpty() ? null : pkg;
+    }
+
     String[] listRecentTasks(int maxCount) {
         if (maxCount <= 0) {
             return new String[0];

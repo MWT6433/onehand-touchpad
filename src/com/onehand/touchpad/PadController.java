@@ -895,9 +895,34 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
 
         beginSwitcherHandoff(nextView);
+        refreshSwitcherForeground(nextView);
         log.info("TASK_SWITCHER", "show=1 side=" + side
                 + " rows=" + nextView.getTaskCount()
                 + " handleY=" + panelParams.y);
+    }
+
+    /**
+     * 抽屉挂上后再补一次"当前应用"：无障碍事件会漏（下拉通知栏再收起、
+     * 从最近任务切回同一应用都不一定重发事件），不补的话蓝框会时有时无。
+     */
+    private void refreshSwitcherForeground(TaskSwitcherView view) {
+        if (view == null) {
+            return;
+        }
+        Thread worker = new Thread(() -> {
+            String packageName = ShizukuInjector.topResumedPackage();
+            if (packageName == null) {
+                return;
+            }
+            mainHandler.post(() -> {
+                if (taskSwitcherOpen && taskSwitcherView == view) {
+                    view.setForegroundPackage(packageName);
+                    log.info("TASK_SWITCHER", "fg_refresh=" + packageName);
+                }
+            });
+        }, "ohtp-fg-refresh");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     private void hideTaskSwitcher() {

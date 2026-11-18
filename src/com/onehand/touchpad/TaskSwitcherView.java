@@ -51,7 +51,9 @@ final class TaskSwitcherView extends View {
     private static final int ROW_ACTION_RESERVE_DP = 20;
     private static final int TASK_CLOSE_SIZE_DP = 20;
     private static final int TASK_CLOSE_TOUCH_DP = 44;
-    private static final int TASK_CLOSE_EDGE_DP = 18;
+    // × 圆心到抽屉边缘的距离：行底(8) + 圆半径(10) + 圆与行底之间的呼吸(6)。
+    // 原来写死 18，圆的右缘刚好压在蓝色行底上（间距 0），看着像贴着边框。
+    private static final int TASK_CLOSE_GAP_DP = 6;
     /** 打开抽屉后的触摸静默窗：手指还在抬起途中，任何事件都不该被当成"点 ×"。 */
     private static final long OPEN_TOUCH_GUARD_MS = 220L;
     /** 形变起点用手柄的圆角，避免尺寸变化时圆角跳一下。 */
@@ -118,7 +120,7 @@ final class TaskSwitcherView extends View {
 
     private final PackageManager packageManager;
     private final boolean leftHandle;
-    private final String foregroundPackage;
+    private String foregroundPackage;
     private final int screenWidth;
     private final int screenHeight;
     private final float scaledDensity;
@@ -452,7 +454,8 @@ final class TaskSwitcherView extends View {
         titlePaint.setTextAlign(Paint.Align.LEFT);
         // 小标题与图标列对齐：× 在行首时让过 × 列。
         float titleInset = leftHandle
-                ? dp(TASK_CLOSE_EDGE_DP) + closeTouchSize / 2f + dp(TEXT_GAP_DP)
+                ? dp(DRAWER_PADDING_DP) + dp(TASK_CLOSE_GAP_DP) + closeTouchSize / 2f
+                        + dp(TEXT_GAP_DP)
                 : dp(TITLE_TOP_DP);
         Paint.FontMetrics titleMetrics = titlePaint.getFontMetrics();
         canvas.drawText("最近使用", drawerLeft + titleInset,
@@ -515,6 +518,20 @@ final class TaskSwitcherView extends View {
             closeAlpha = CLOSE_ACTIVE_ALPHA;
             currentTop += rowHeight + dp(ROW_GAP_DP);
         }
+    }
+
+    /**
+     * 修正"当前应用"。无障碍的窗口状态事件会漏（下拉通知栏再收起、从最近任务切回
+     * 都不一定再发一次），所以抽屉挂上后再用实时查询补一次。
+     */
+    void setForegroundPackage(String packageName) {
+        String next = packageName == null ? "" : packageName.trim();
+        String current = foregroundPackage == null ? "" : foregroundPackage;
+        if (next.equals(current)) {
+            return;
+        }
+        foregroundPackage = next;
+        invalidate();
     }
 
     private boolean isForeground(TaskRow task) {
@@ -594,9 +611,8 @@ final class TaskSwitcherView extends View {
     }
 
     private float taskCloseCenterX() {
-        return leftHandle
-                ? drawerLeft + dp(TASK_CLOSE_EDGE_DP)
-                : drawerLeft + drawerWidth - dp(TASK_CLOSE_EDGE_DP);
+        float edge = dp(DRAWER_PADDING_DP) + closeSize / 2f + dp(TASK_CLOSE_GAP_DP);
+        return leftHandle ? drawerLeft + edge : drawerLeft + drawerWidth - edge;
     }
 
     private void drawTaskText(Canvas canvas, TaskRow task,
