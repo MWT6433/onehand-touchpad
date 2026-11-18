@@ -76,6 +76,14 @@ final class TaskSwitcherView extends View {
      * 遮罩在 0→90% 之间铺开，末段两者一起自然收掉。
      */
     private static final float MORPH_CONTENT_FULL = 0.45f;
+    /**
+     * 外壳（填充 + 两条发丝线）完全实心所需的形变进度。
+     *
+     * morph=0 时外壳完全透明，露出的是底层手柄本身 —— 这样抽屉从横条长出来/收回横条
+     * 都不需要把面板藏起来，也就不存在"两个窗口同时画同一根横条"的交接。
+     * （45% 黑叠 45% 黑 ≈ 70% 黑，真机上就是收尾之后那一下"颜色突然变深"。）
+     */
+    private static final float MORPH_SHELL_FULL = 0.18f;
     private static final float MORPH_SCRIM_FULL = 0.90f;
     private static final int TASK_CLOSE_MARK_DP = 7;
     private static final int TITLE_TOP_DP = 7;
@@ -367,27 +375,37 @@ final class TaskSwitcherView extends View {
         // 收敛到 PanelView.drawHandle 的取值，摘窗那一帧才不会有颜色跳变。
         // （面板收回动画早就用同一套办法，见 PanelView.drawPanel 的 collapse 分支。）
         float toHandle = 1f - morph;
+        // 填充与两条发丝线一起随形变淡入淡出：morph=0 时整块外壳是透明的，
+        // 屏幕上那根横条就是底层手柄自己画的，颜色天然逐像素一致。
+        float shellAlpha = smoothstep(0f, MORPH_SHELL_FULL, morph);
         float hairline = Math.max(1f, PanelView.HAIRLINE_DP * density());
-        drawerPaint.setColor(blendArgb(DRAWER_COLOR, HANDLE_FILL_COLOR, toHandle));
-        canvas.drawRoundRect(card, corner, corner, drawerPaint);
+        drawerPaint.setColor(DRAWER_COLOR);
+        drawerPaint.setAlpha(Math.round(Color.alpha(DRAWER_COLOR) * shellAlpha));
+        if (shellAlpha > 0f) {
+            canvas.drawRoundRect(card, corner, corner, drawerPaint);
+        }
 
         float outerInset = lerp(0f, hairline / 2f, toHandle);
         outerStrokePaint.setStrokeWidth(lerp(dp(1), hairline, toHandle));
-        outerStrokePaint.setColor(
-                blendArgb(OUTER_STROKE_COLOR, PanelView.FRAME_OUTER, toHandle));
+        outerStrokePaint.setColor(OUTER_STROKE_COLOR);
+        outerStrokePaint.setAlpha(Math.round(Color.alpha(OUTER_STROKE_COLOR) * shellAlpha));
         barRect.set(card);
         barRect.inset(outerInset, outerInset);
         float outerRadius = Math.max(0f, corner - outerInset);
-        canvas.drawRoundRect(barRect, outerRadius, outerRadius, outerStrokePaint);
+        if (shellAlpha > 0f) {
+            canvas.drawRoundRect(barRect, outerRadius, outerRadius, outerStrokePaint);
+        }
 
         float innerInset = lerp(dp(1), hairline * 1.5f, toHandle);
         innerStrokePaint.setStrokeWidth(lerp(innerStrokeWidth, hairline, toHandle));
-        innerStrokePaint.setColor(
-                blendArgb(INNER_STROKE_COLOR, PanelView.FRAME_INNER, toHandle));
+        innerStrokePaint.setColor(INNER_STROKE_COLOR);
+        innerStrokePaint.setAlpha(Math.round(Color.alpha(INNER_STROKE_COLOR) * shellAlpha));
         innerStrokeRect.set(card);
         innerStrokeRect.inset(innerInset, innerInset);
         float innerRadius = Math.max(0f, corner - innerInset);
-        canvas.drawRoundRect(innerStrokeRect, innerRadius, innerRadius, innerStrokePaint);
+        if (shellAlpha > 0f) {
+            canvas.drawRoundRect(innerStrokeRect, innerRadius, innerRadius, innerStrokePaint);
+        }
 
         int restoreTo = canvas.save();
         if (card != drawerRect && morph < 1f) {

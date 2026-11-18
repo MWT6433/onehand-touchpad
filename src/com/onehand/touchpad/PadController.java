@@ -42,8 +42,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final int WINDOW_TYPE_APPLICATION_OVERLAY =
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
     private static final int HANDLE_EDGE_MARGIN_DP = 8;
-    /** 面板迟迟不重绘时的兜底摘窗时限。 */
-    private static final long SWITCHER_HANDOFF_DELAY_MS = 180L;
+
     private static final long LONG_PRESS_MS = 600L;
     private static final float FOLLOW_SLOP_MM = 5.0f;
     private static final float PULL_TRIGGER_MM = 6.0f;
@@ -123,11 +122,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private WindowManager.LayoutParams taskSwitcherParams;
     private ValueAnimator taskSwitcherMorphAnimator;
     private Runnable taskSwitcherCloseWatchdog;
-    private ViewTreeObserver.OnDrawListener switcherFirstDrawListener;
-    private boolean switcherFirstDrawDone;
-    private TaskSwitcherView pendingSwitcherRemoval;
-    private ViewTreeObserver.OnDrawListener panelRedrawListener;
-    private boolean switcherRemovalDone;
+
+
     private final RectF taskSwitcherHandleRect = new RectF();
     private State state = State.SETTLED;
     private boolean started;
@@ -361,11 +357,13 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (!started || !panelAttached || panelParams == null || state != State.SETTLED) {
             return;
         }
+        // 用 view alpha 而不是 setVisibility(INVISIBLE)：窗口里画好的手柄不会丢，恢复是瞬时的
+        // （没有重绘延迟）；两个 view 的 alpha 在同一条消息里互换时合成器同一帧生效，
+        // 屏幕上只会出现一份横条。
+        panelView.setAlpha(handleSuppressed ? 0f : 1f);
         if (handleSuppressed) {
-            panelView.setVisibility(View.INVISIBLE);
             panelParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         } else {
-            panelView.setVisibility(View.VISIBLE);
             panelParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         }
         performPanelLayoutUpdate(SystemClock.uptimeMillis());
@@ -721,11 +719,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             taskSwitcherView = null;
             taskSwitcherParams = null;
             taskSwitcherWindowType = 0;
-            setHandleSuppressed(false);
             return;
         }
 
-        hideHandleOnFirstDraw(nextView);
         startSwitcherMorph(0f, 1f, null);
         log.info("TASK_SWITCHER", "show=1 side=" + side
                 + " rows=" + nextView.getTaskCount()
@@ -753,26 +749,29 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private void detachTaskSwitcher(String reason) {
         cancelSwitcherCloseWatchdog();
-        // 先恢复底层手柄，再隔一帧摘窗。
-        // 面板重绘出手柄比窗口移除晚一帧，同帧做会露出一帧"抽屉没了、手柄还没画"的空档
-        // （2026-11-18 慢放实测 f179：条带区 245 = 页面本色，正常应为 136）。
-        // 这一帧里留在屏幕上的是抽屉最后一帧——与手柄逐像素等价的横条，看不出区别。
-        setHandleSuppressed(false);
-        if (taskSwitcherAttached) {
-            TaskSwitcherView removed = taskSwitcherView;
-            taskSwitcherView = null;
-            taskSwitcherParams = null;
-            taskSwitcherWindowType = 0;
-            removeSwitcherWindowAfterPanelDraw(removed);
-        } else {
-            taskSwitcherOpen = false;
+        // 抽屉收尾时外壳已经随形变淡到全透明（见 MORPH_SHELL_FULL），屏幕上那根横条
+        // 一直是底层手柄自己画的 —— 所以这里只摘窗，不碰手柄、也不用赌任何时序。
+        TaskSwitcherView removed = taskSwitcherView;
+        taskSwitcherView = null;
+        taskSwitcherParams = null;
+        taskSwitcherWindowType = 0;
+        if (taskSwitcherAttached && removed != null) {
+            mainHandler.post(() -> {
+                try {
+                    windowManager.removeViewImmediate(removed);
+                } catch (RuntimeException ignored) {
+                    // The accessibility window may already have been detached.
+                }
+            });
         }
+        taskSwitcherAttached = false;
+        taskSwitcherOpen = false;
         log.info("TASK_SWITCHER", "show=0 reason=" + reason);
     }
 
     /**
      * 关窗看门狗：收起动画一旦被打断（锁屏、动画器被取消、主线程卡顿），
-     * 这个全屏窗口会留在屏幕上吞掉所有触摸。兜底在 RETRACT + 250ms 后强制摘窗，
+     * 这个全屏窗口会留在屏幕上吞掉所有触摸。兜底在动画时长 + 250ms 后强制摘窗，
      * 把最坏情况从"整屏点不动"压到半秒无响应。
      */
     private void scheduleSwitcherCloseWatchdog(long delayMs) {
@@ -785,102 +784,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             }
         };
         mainHandler.postDelayed(taskSwitcherCloseWatchdog, delayMs);
-    }
-
-    /**
-     * 抽屉的第一帧真正画出来之后再藏底层手柄。
-     *
-     * 新窗口的首个 buffer 比"隐藏旧窗口"晚一帧到达：无论先藏后挂、还是同帧藏，
-     * 都会露出一帧"手柄没了、抽屉还没画出来"的空档（2026-11-18 真机录屏 f043：
-     * 手柄区灰度 247.5 = 页面底色，正常应为 ~136）。挂在 OnDrawListener 上，
-     * 隐藏动作与抽屉的首帧落在同一帧，交接逐像素无缝。
-     */
-    private void hideHandleOnFirstDraw(final TaskSwitcherView view) {
-        switcherFirstDrawDone = false;
-        switcherFirstDrawListener = new ViewTreeObserver.OnDrawListener() {
-            @Override
-            public void onDraw() {
-                if (switcherFirstDrawDone) {
-                    return;
-                }
-                switcherFirstDrawDone = true;
-                try {
-                    setHandleSuppressed(true);
-                } catch (RuntimeException exception) {
-                    log.warn("TASK_SWITCHER", "suppress_failed:"
-                            + exception.getClass().getSimpleName());
-                }
-                // removeOnDrawListener 不许在 onDraw 里调用，Android 会直接抛
-                // IllegalStateException("Cannot call removeOnDrawListener inside of onDraw")
-                // 把整个进程带走（2026-11-18 真机 19:18:44 实测崩溃）。排到本帧绘制之后。
-                view.post(() -> {
-                    ViewTreeObserver observer = view.getViewTreeObserver();
-                    if (observer.isAlive() && switcherFirstDrawListener != null) {
-                        observer.removeOnDrawListener(switcherFirstDrawListener);
-                        switcherFirstDrawListener = null;
-                    }
-                });
-            }
-        };
-        view.getViewTreeObserver().addOnDrawListener(switcherFirstDrawListener);
-    }
-
-    /**
-     * 等面板把手柄重绘出来之后再摘抽屉窗口。
-     *
-     * 面板从 INVISIBLE 恢复需要一次遍历才把内容画进 surface，而摘窗是立即生效的
-     * WM 调用：两者落在不同帧就会露出一帧"抽屉没了、手柄还没画"的空档
-     * （2026-11-18 慢放实测 f179；原速复测 6 轮里还复现 1 次 f133，说明盲等 34ms
-     * 不可靠）。改为挂在面板的 OnDrawListener 上：面板这一帧画出手柄，紧接着摘窗。
-     * 另设兜底超时，面板若始终不画（未布局等异常）也不至于把窗口留在屏幕上。
-     */
-    private void removeSwitcherWindowAfterPanelDraw(final TaskSwitcherView removed) {
-        pendingSwitcherRemoval = removed;
-        switcherRemovalDone = false;
-        if (panelView != null && panelAttached) {
-            panelRedrawListener = new ViewTreeObserver.OnDrawListener() {
-                @Override
-                public void onDraw() {
-                    // onDraw 里不许直接改窗口（也不宜重入 WM），排到本帧绘制之后。
-                    mainHandler.post(() -> finishSwitcherWindowRemoval("panel_draw"));
-                }
-            };
-            ViewTreeObserver observer = panelView.getViewTreeObserver();
-            if (observer.isAlive()) {
-                observer.addOnDrawListener(panelRedrawListener);
-            }
-        }
-        mainHandler.postDelayed(() -> finishSwitcherWindowRemoval("timeout"),
-                SWITCHER_HANDOFF_DELAY_MS);
-    }
-
-    private void finishSwitcherWindowRemoval(String reason) {
-        if (switcherRemovalDone) {
-            return;
-        }
-        switcherRemovalDone = true;
-        TaskSwitcherView removed = pendingSwitcherRemoval;
-        pendingSwitcherRemoval = null;
-        if (panelView != null && panelRedrawListener != null) {
-            final ViewTreeObserver.OnDrawListener listener = panelRedrawListener;
-            panelRedrawListener = null;
-            panelView.post(() -> {
-                ViewTreeObserver observer = panelView.getViewTreeObserver();
-                if (observer.isAlive()) {
-                    observer.removeOnDrawListener(listener);
-                }
-            });
-        }
-        if (removed != null) {
-            try {
-                windowManager.removeViewImmediate(removed);
-            } catch (RuntimeException ignored) {
-                // The accessibility window may already have been detached.
-            }
-        }
-        taskSwitcherAttached = false;
-        taskSwitcherOpen = false;
-        log.info("TASK_SWITCHER", "window_removed=" + reason);
     }
 
     private void cancelSwitcherCloseWatchdog() {
