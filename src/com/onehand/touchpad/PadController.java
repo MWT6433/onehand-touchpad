@@ -200,6 +200,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private float cursorY;
     private boolean cursorInitialized;
     private boolean probeExclusionEnabled;
+    /** 已上报给系统的排除尺寸，避免每帧都往 ViewRootImpl 里写。 */
+    private int gestureExclusionWidth = -1;
+    private int gestureExclusionHeight = -1;
     private long lastCursorLogTime;
     private long lastPulledLogTime;
     private long lastLayoutUpdateTime;
@@ -351,6 +354,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         panelWindowType = addOverlayWindow(panelView, panelParams, "panel");
         panelAttached = panelWindowType != 0;
         if (panelAttached) {
+            // 窗口一挂上就把手柄矩形报给系统（等第一次布局更新再报会晚几帧）。
+            applyHandleGestureExclusion();
             logWindowFrame(panelView, "panel");
             if (handleSuppressed) {
                 setHandleSuppressed(true);
@@ -467,6 +472,13 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         } catch (RuntimeException exception) {
             log.error("PROBE", "E2 exclusion=" + stateValue + " rects=0 err="
                     + exception.getClass().getSimpleName());
+        } finally {
+            // 手柄区域的排除是常驻能力（见 applyHandleGestureExclusion）。探针只是诊断，
+            // 不论开着还是关掉，最后都要把常驻排除重新写回去——否则关掉探针会把
+            // 手柄的排除一起清掉，而尺寸没变时不会重发。
+            gestureExclusionWidth = -1;
+            gestureExclusionHeight = -1;
+            applyHandleGestureExclusion();
         }
         return probeExclusionEnabled;
     }
@@ -2395,8 +2407,39 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         performPanelLayoutUpdate(now);
     }
 
+    /**
+     * 手柄区域的系统手势排除：把手柄窗口当前的矩形交给系统，让"从边缘往内滑 = 返回"
+     * 在这块区域让位给触控板本身（否则从手柄起手的拖动会被系统手势抢走）。
+     *
+     * 这是 Android 10（API 29）起的官方接口 View.setSystemGestureExclusionRects，
+     * 额度是每条屏幕边 200dp：手柄高 96dp，在额度内；窗口在其它形态下变大到超过
+     * 200dp 时系统会直接忽略这条排除（不报错），所以这里按当前窗口尺寸如实上报。
+     * 只在尺寸变化时重报，避免拖动期间每帧都写一次。
+     */
+    private void applyHandleGestureExclusion() {
+        if (panelView == null || panelParams == null || !panelAttached) {
+            return;
+        }
+        int width = panelParams.width;
+        int height = panelParams.height;
+        if (width <= 0 || height <= 0
+                || (width == gestureExclusionWidth && height == gestureExclusionHeight)) {
+            return;
+        }
+        gestureExclusionWidth = width;
+        gestureExclusionHeight = height;
+        try {
+            panelView.setSystemGestureExclusionRects(
+                    Collections.singletonList(new Rect(0, 0, width, height)));
+            log.info("GESTURE", "exclusion=on w=" + width + " h=" + height);
+        } catch (RuntimeException exception) {
+            log.warn("GESTURE", "exclusion=failed " + exception.getClass().getSimpleName());
+        }
+    }
+
     private void performPanelLayoutUpdate(long now) {
         lastLayoutUpdateTime = now;
+        applyHandleGestureExclusion();
         log.trace("WINDOW_GEOM", "x=" + panelParams.x + " y=" + panelParams.y
                 + " w=" + panelParams.width + " h=" + panelParams.height
                 + " mode=" + panelView.getModeName());
