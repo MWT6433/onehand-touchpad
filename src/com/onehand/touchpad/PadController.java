@@ -42,7 +42,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final int WINDOW_TYPE_APPLICATION_OVERLAY =
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
     private static final int HANDLE_EDGE_MARGIN_DP = 8;
+    /** 抽屉挂上时的 alpha：不用 0，避免任何"零 alpha 不绘制"的优化把首帧回调吞掉。 */
+    private static final float SWITCHER_ATTACH_ALPHA = 0.01f;
 
+    /** 抽屉首帧迟迟不来时的兜底交接时限（否则抽屉会一直透明）。 */
+    private static final long SWITCHER_HANDOFF_TIMEOUT_MS = 160L;
     private static final long LONG_PRESS_MS = 600L;
     private static final float FOLLOW_SLOP_MM = 5.0f;
     private static final float PULL_TRIGGER_MM = 6.0f;
@@ -122,8 +126,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private WindowManager.LayoutParams taskSwitcherParams;
     private ValueAnimator taskSwitcherMorphAnimator;
     private Runnable taskSwitcherCloseWatchdog;
-
-
+    private ViewTreeObserver.OnDrawListener switcherFirstDrawListener;
+    private boolean switcherFirstDrawDone;
+    private Runnable switcherHandoffTimeout;
+    private boolean switcherHandoffDone;
     private final RectF taskSwitcherHandleRect = new RectF();
     private State state = State.SETTLED;
     private boolean started;
@@ -358,8 +364,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             return;
         }
         // 用 view alpha 而不是 setVisibility(INVISIBLE)：窗口里画好的手柄不会丢，恢复是瞬时的
-        // （没有重绘延迟）；两个 view 的 alpha 在同一条消息里互换时合成器同一帧生效，
-        // 屏幕上只会出现一份横条。
+        // （没有重绘延迟）。
         panelView.setAlpha(handleSuppressed ? 0f : 1f);
         if (handleSuppressed) {
             panelParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
@@ -703,6 +708,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         applySwitcherHandleRect();
         nextView.setHandleRect(taskSwitcherHandleRect);
         nextView.setMorph(0f);
+        // 挂上时保持透明：这一帧由底层手柄提供横条像素，等抽屉画出首帧再原子交接。
+        nextView.setAlpha(SWITCHER_ATTACH_ALPHA);
         nextView.setInteractive(false);
         try {
             taskSwitcherParams = createTaskSwitcherParams();
@@ -719,10 +726,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             taskSwitcherView = null;
             taskSwitcherParams = null;
             taskSwitcherWindowType = 0;
+            setHandleSuppressed(false);
             return;
         }
 
-        startSwitcherMorph(0f, 1f, null);
+        beginSwitcherHandoff(nextView);
         log.info("TASK_SWITCHER", "show=1 side=" + side
                 + " rows=" + nextView.getTaskCount()
                 + " handleY=" + panelParams.y);
@@ -749,13 +757,23 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private void detachTaskSwitcher(String reason) {
         cancelSwitcherCloseWatchdog();
-        // 抽屉收尾时外壳已经随形变淡到全透明（见 MORPH_SHELL_FULL），屏幕上那根横条
-        // 一直是底层手柄自己画的 —— 所以这里只摘窗，不碰手柄、也不用赌任何时序。
         TaskSwitcherView removed = taskSwitcherView;
-        taskSwitcherView = null;
-        taskSwitcherParams = null;
-        taskSwitcherWindowType = 0;
+        if (!switcherHandoffDone) {
+            // 交接还没完成就被关掉：撤掉挂起的首帧回调，别让它在摘窗后再把动画启动起来。
+            switcherHandoffDone = true;
+            detachSwitcherFirstDrawListener(removed);
+        }
+        // 收尾交接：同一条消息里把底层手柄显回来、把抽屉透明掉，然后才摘窗。
+        // 两者都是 view alpha，同一帧生效：
+        //   - 不会"抽屉没了、手柄还没画"（漏一帧发亮）；
+        //   - 也不会"抽屉的横条盖在手柄上"（45% + 45% = 70%，就是收尾后那一下变深）。
+        // 摘窗排到下一条消息：此时抽屉已经全透明，摘不摘都看不出来，不必再赌时序。
+        setHandleSuppressed(false);
         if (taskSwitcherAttached && removed != null) {
+            taskSwitcherView = null;
+            taskSwitcherParams = null;
+            taskSwitcherWindowType = 0;
+            removed.setAlpha(0f);
             mainHandler.post(() -> {
                 try {
                     windowManager.removeViewImmediate(removed);
@@ -771,7 +789,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     /**
      * 关窗看门狗：收起动画一旦被打断（锁屏、动画器被取消、主线程卡顿），
-     * 这个全屏窗口会留在屏幕上吞掉所有触摸。兜底在动画时长 + 250ms 后强制摘窗，
+     * 这个全屏窗口会留在屏幕上吞掉所有触摸。兜底在 RETRACT + 250ms 后强制摘窗，
      * 把最坏情况从"整屏点不动"压到半秒无响应。
      */
     private void scheduleSwitcherCloseWatchdog(long delayMs) {
@@ -784,6 +802,65 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             }
         };
         mainHandler.postDelayed(taskSwitcherCloseWatchdog, delayMs);
+    }
+
+    /**
+     * 抽屉 ↔ 底层手柄的交接：抽屉先以透明状态挂上并画出首帧，然后在同一条消息里
+     * 把抽屉的 alpha 升到 1、把底层手柄的 alpha 降到 0，最后才启动形变动画。
+     *
+     * 两根横条都是 45% 黑，交接只有三种可能：
+     *   · 两层同时可见 → 合成 ~70% 黑（"变深一下"）；
+     *   · 两层都不可见 → 露出页面本色（"漏一帧发亮"）；
+     *   · 同一帧切换 → 只看到一份横条，这是唯一正确的。
+     * view 级 alpha 走 RenderNode，两个 view 在同一条消息里改，合成器同一帧生效；
+     * 而且 alpha=0 不会丢掉窗口里已画好的内容，恢复是瞬时的。
+     */
+    private void beginSwitcherHandoff(final TaskSwitcherView view) {
+        switcherHandoffDone = false;
+        switcherFirstDrawListener = new ViewTreeObserver.OnDrawListener() {
+            @Override
+            public void onDraw() {
+                // 不在 onDraw 里摘监听/改窗口（会抛 IllegalStateException），排到本帧之后。
+                mainHandler.post(() -> startSwitcherAfterHandoff(view, "first_draw"));
+            }
+        };
+        ViewTreeObserver observer = view.getViewTreeObserver();
+        if (observer.isAlive()) {
+            observer.addOnDrawListener(switcherFirstDrawListener);
+        }
+        switcherHandoffTimeout = () -> startSwitcherAfterHandoff(view, "timeout");
+        mainHandler.postDelayed(switcherHandoffTimeout, SWITCHER_HANDOFF_TIMEOUT_MS);
+    }
+
+    private void startSwitcherAfterHandoff(TaskSwitcherView view, String reason) {
+        if (switcherHandoffDone) {
+            return;
+        }
+        switcherHandoffDone = true;
+        detachSwitcherFirstDrawListener(view);
+        if (!taskSwitcherAttached || taskSwitcherView != view) {
+            return;
+        }
+        // 同一条消息里互换：合成器这一帧只会看到一份横条。
+        view.setAlpha(1f);
+        setHandleSuppressed(true);
+        startSwitcherMorph(0f, 1f, null);
+        log.info("TASK_SWITCHER", "handoff=" + reason);
+    }
+
+    private void detachSwitcherFirstDrawListener(TaskSwitcherView view) {
+        if (switcherHandoffTimeout != null) {
+            mainHandler.removeCallbacks(switcherHandoffTimeout);
+            switcherHandoffTimeout = null;
+        }
+        if (switcherFirstDrawListener != null && view != null) {
+            final ViewTreeObserver.OnDrawListener listener = switcherFirstDrawListener;
+            switcherFirstDrawListener = null;
+            ViewTreeObserver observer = view.getViewTreeObserver();
+            if (observer.isAlive()) {
+                observer.removeOnDrawListener(listener);
+            }
+        }
     }
 
     private void cancelSwitcherCloseWatchdog() {
