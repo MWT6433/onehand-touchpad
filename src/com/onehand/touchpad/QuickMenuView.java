@@ -51,6 +51,7 @@ final class QuickMenuView extends View {
     private final RectF shadowRect = new RectF();
     private final RectF highlightRect = new RectF();
     private final RectF strokeRect = new RectF();
+    private float hairlineWidth = 3f;
     private final Path cardClipPath = new Path();
     private final Path highlightPath = new Path();
     private final float[] highlightRadii = new float[8];
@@ -81,14 +82,18 @@ final class QuickMenuView extends View {
     QuickMenuView(Context context, boolean leftHandle, int screenWidth, boolean clickMode) {
         super(context);
         density = context.getResources().getDisplayMetrics().density;
-        cardWidth = dp(CARD_WIDTH_DP);
-        cardHeight = dp(MENU_ROW_HEIGHT_DP * MENU_ROW_COUNT);
-        this.rowHeight = cardHeight / MENU_ROW_COUNT;
-        cardLeft = (screenWidth - cardWidth) / 2f;
-        cardTop = dp(CARD_TOP_DP);
+        // 几何一律落在整像素上：density 3.5 时 dp(195)=682.5、dp(65)=227.5，
+        // 卡片底边和行分割线都落在半像素上，四边描边的抗锯齿分布各不相同，
+        // 看起来就是"描边不均匀"（真机截图实测过）。
+        cardWidth = Math.round(dp(CARD_WIDTH_DP));
+        this.rowHeight = Math.round(dp(MENU_ROW_HEIGHT_DP));
+        cardHeight = this.rowHeight * MENU_ROW_COUNT;
+        cardLeft = Math.round((screenWidth - cardWidth) / 2f);
+        cardTop = Math.round(dp(CARD_TOP_DP));
         cardRect.set(cardLeft, cardTop, cardLeft + cardWidth, cardTop + cardHeight);
         cornerRadius = Math.min(
-                Prefs.CORNER_RADIUS_DP * new Prefs(context).getPanelScale() * density,
+                Math.round(Prefs.CORNER_RADIUS_DP
+                        * new Prefs(context).getPanelScale() * density),
                 cardHeight / 2f);
         cardClipPath.addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW);
         switchSubtitle = leftHandle ? "手柄换到右侧" : "手柄换到左侧";
@@ -99,7 +104,9 @@ final class QuickMenuView extends View {
         shadowPaint.setStyle(Paint.Style.FILL);
         fillPaint.setStyle(Paint.Style.FILL);
         strokePaint.setStyle(Paint.Style.STROKE);
-        strokePaint.setStrokeWidth(dp(1));
+        // 1dp≈3.5px，取整像素 3px 才能四边一样粗（非整宽度的描边会跨像素、抗锯齿不均）。
+        hairlineWidth = Math.max(2f, Math.round(dp(1) * 0.75f));
+        strokePaint.setStrokeWidth(hairlineWidth);
         setPivotX(cardLeft + cardWidth / 2f);
         setPivotY(cardTop + cardHeight / 2f);
         titlePaint.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
@@ -167,14 +174,10 @@ final class QuickMenuView extends View {
         fillPaint.setColor(0x6B000000);
         canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, fillPaint);
 
-        // 2. Glass body and inset 1dp outline.
+        // 2. Glass body.  （原来这里还有一层 13% 黑的内描边，压在近白玻璃上
+        //    实测 Δ<3，等于没画，已去掉；描边统一在最后一步画。）
         fillPaint.setColor(0xDBFFFFFF);
         canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, fillPaint);
-        strokeRect.set(cardRect);
-        strokeRect.inset(dp(0.5f), dp(0.5f));
-        strokePaint.setColor(0x21000000);
-        float strokeRadius = Math.max(0f, cornerRadius - dp(0.5f));
-        canvas.drawRoundRect(strokeRect, strokeRadius, strokeRadius, strokePaint);
 
         // 3. Vertical curvature clipped to the rounded card.
         int save = canvas.save();
@@ -239,31 +242,18 @@ final class QuickMenuView extends View {
         drawModeIcon(canvas);
         drawCloseIcon(canvas);
 
-        // 8. Inner stroke.
-        strokePaint.setStrokeWidth(dp(1));
-        strokePaint.setColor(0x80FFFFFF);
+        // 8. 统一描边：贴边、整像素、四边一致，画在最后（高亮行盖不住它）。
+        //    真机实测（修复前）：上 250 / 下 221 / 左 224 / 右 224，卡片内部 215~222
+        //    —— 只有顶部那条自造的 0.92 白线看得见，其余三边等于零。
         strokeRect.set(
-                cardRect.left + dp(0.5f), cardRect.top + dp(0.5f),
-                cardRect.right - dp(0.5f), cardRect.bottom - dp(0.5f));
-        float innerRadius = Math.max(0f, cornerRadius - dp(0.5f));
-        canvas.drawRoundRect(strokeRect, innerRadius, innerRadius, strokePaint);
-
-        // 9. Top mirror line, clipped inside the rounded card.
-        float lineLeft = cardLeft + dp(24);
-        float lineRight = cardLeft + cardWidth - dp(24);
-        save = canvas.save();
-        canvas.clipPath(cardClipPath);
-        shinePaint.setColor(0xFFFFFFFF);
-        shinePaint.setShader(new LinearGradient(
-                lineLeft, 0f, lineRight, 0f,
-                new int[]{0x00FFFFFF, 0xEBFFFFFF, 0xEBFFFFFF, 0x00FFFFFF},
-                new float[]{0f, 0.16f, 0.84f, 1f},
-                Shader.TileMode.CLAMP));
-        canvas.drawRect(
-                lineLeft, cardTop + dp(0.5f),
-                lineRight, cardTop + dp(1.5f), shinePaint);
-        shinePaint.setShader(null);
-        canvas.restoreToCount(save);
+                cardRect.left + hairlineWidth / 2f,
+                cardRect.top + hairlineWidth / 2f,
+                cardRect.right - hairlineWidth / 2f,
+                cardRect.bottom - hairlineWidth / 2f);
+        strokePaint.setStrokeWidth(hairlineWidth);
+        strokePaint.setColor(0x80FFFFFF);
+        float edgeRadius = Math.max(0f, cornerRadius - hairlineWidth / 2f);
+        canvas.drawRoundRect(strokeRect, edgeRadius, edgeRadius, strokePaint);
     }
 
     @Override
@@ -370,8 +360,9 @@ final class QuickMenuView extends View {
     }
 
     private void drawSeparator(Canvas canvas, float y) {
-        float x = cardLeft + dp(TEXT_INSET_DP);
-        canvas.drawRect(x, y, cardLeft + cardWidth, y + dp(1), fillPaint);
+        float x = cardLeft + Math.round(dp(TEXT_INSET_DP));
+        float top = Math.round(y);
+        canvas.drawRect(x, top, cardLeft + cardWidth, top + hairlineWidth, fillPaint);
     }
 
     private void startEntryAnimation() {
