@@ -112,7 +112,8 @@ final class TaskSwitcherView extends View {
     /** 面板缩放 k（设置页那一档），抽屉的每个几何量都乘它。 */
     private final float scale;
     /** 打开/收起形变进度：0 = 手柄矩形，1 = 抽屉矩形。 */
-    private float morph = 1f;
+    // 初值必须是 0（= 手柄形态）：万一首帧在任何配置之前发生，也只能画成横条。
+    private float morph = 0f;
     /** 形变起点（手柄矩形），由控制器在开窗时写入。 */
     private final RectF handleRect = new RectF();
     private final RectF morphRect = new RectF();
@@ -321,6 +322,11 @@ final class TaskSwitcherView extends View {
         super.onDraw(canvas);
         if (tasks.isEmpty()) {
             canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
+            return;
+        }
+
+        // 还没拿到手柄矩形就别画：此时 morph<1 无从插值，画出来只会是整张卡片。
+        if (morph < 1f && handleRect.isEmpty()) {
             return;
         }
 

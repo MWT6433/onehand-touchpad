@@ -42,6 +42,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final int WINDOW_TYPE_APPLICATION_OVERLAY =
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
     private static final int HANDLE_EDGE_MARGIN_DP = 8;
+    /** 面板迟迟不重绘时的兜底摘窗时限。 */
+    private static final long SWITCHER_HANDOFF_DELAY_MS = 180L;
     private static final long LONG_PRESS_MS = 600L;
     private static final float FOLLOW_SLOP_MM = 5.0f;
     private static final float PULL_TRIGGER_MM = 6.0f;
@@ -123,6 +125,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private Runnable taskSwitcherCloseWatchdog;
     private ViewTreeObserver.OnDrawListener switcherFirstDrawListener;
     private boolean switcherFirstDrawDone;
+    private TaskSwitcherView pendingSwitcherRemoval;
+    private ViewTreeObserver.OnDrawListener panelRedrawListener;
+    private boolean switcherRemovalDone;
     private final RectF taskSwitcherHandleRect = new RectF();
     private State state = State.SETTLED;
     private boolean started;
@@ -691,6 +696,16 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         nextView.setOpeningTime(gestureDownTime);
 
         taskSwitcherView = nextView;
+        // 几何与形变起点必须在窗口挂上之前写好。
+        // 新窗口的首帧可能在任何一次遍历里发生：一旦它抢在 setHandleRect 之前绘制，
+        // 视图拿到的是"空手柄矩形 + morph<1"，会把整张卡片按抽屉矩形全尺寸画出来
+        // （填充已是手柄色，于是是一大块半透明灰影），下一帧又缩回横条——真机慢放里
+        // 那一闪就是这个竞态。写死顺序后首帧必然是"与手柄逐像素等价的横条"。
+        taskSwitcherOpen = true;
+        applySwitcherHandleRect();
+        nextView.setHandleRect(taskSwitcherHandleRect);
+        nextView.setMorph(0f);
+        nextView.setInteractive(false);
         try {
             taskSwitcherParams = createTaskSwitcherParams();
             taskSwitcherWindowType = addOverlayWindow(
@@ -702,6 +717,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         taskSwitcherAttached = taskSwitcherWindowType != 0;
         if (!taskSwitcherAttached) {
+            taskSwitcherOpen = false;
             taskSwitcherView = null;
             taskSwitcherParams = null;
             taskSwitcherWindowType = 0;
@@ -709,11 +725,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             return;
         }
 
-        taskSwitcherOpen = true;
-        applySwitcherHandleRect();
-        nextView.setHandleRect(taskSwitcherHandleRect);
-        nextView.setMorph(0f);
-        nextView.setInteractive(false);
         hideHandleOnFirstDraw(nextView);
         startSwitcherMorph(0f, 1f, null);
         log.info("TASK_SWITCHER", "show=1 side=" + side
@@ -734,7 +745,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (taskSwitcherAttached && taskSwitcherView != null) {
             // 与面板收回同一段运动：矩形缩回手柄、内容在前 45% 淡完，结束后再摘窗。
             taskSwitcherView.setInteractive(false);
-            scheduleSwitcherCloseWatchdog();
             startSwitcherMorph(1f, 0f, () -> detachTaskSwitcher(reason));
             return;
         }
@@ -743,19 +753,20 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private void detachTaskSwitcher(String reason) {
         cancelSwitcherCloseWatchdog();
-        // 先恢复底层手柄、再摘窗：抽屉最后一帧本身就是手柄，交接看不出变化。
+        // 先恢复底层手柄，再隔一帧摘窗。
+        // 面板重绘出手柄比窗口移除晚一帧，同帧做会露出一帧"抽屉没了、手柄还没画"的空档
+        // （2026-11-18 慢放实测 f179：条带区 245 = 页面本色，正常应为 136）。
+        // 这一帧里留在屏幕上的是抽屉最后一帧——与手柄逐像素等价的横条，看不出区别。
         setHandleSuppressed(false);
         if (taskSwitcherAttached) {
-            try {
-                windowManager.removeViewImmediate(taskSwitcherView);
-            } catch (RuntimeException ignored) {
-                // The accessibility window may already have been detached.
-            }
+            TaskSwitcherView removed = taskSwitcherView;
+            taskSwitcherView = null;
+            taskSwitcherParams = null;
+            taskSwitcherWindowType = 0;
+            removeSwitcherWindowAfterPanelDraw(removed);
+        } else {
+            taskSwitcherOpen = false;
         }
-        taskSwitcherAttached = false;
-        taskSwitcherView = null;
-        taskSwitcherParams = null;
-        taskSwitcherWindowType = 0;
         log.info("TASK_SWITCHER", "show=0 reason=" + reason);
     }
 
@@ -764,7 +775,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
      * 这个全屏窗口会留在屏幕上吞掉所有触摸。兜底在 RETRACT + 250ms 后强制摘窗，
      * 把最坏情况从"整屏点不动"压到半秒无响应。
      */
-    private void scheduleSwitcherCloseWatchdog() {
+    private void scheduleSwitcherCloseWatchdog(long delayMs) {
         cancelSwitcherCloseWatchdog();
         taskSwitcherCloseWatchdog = () -> {
             taskSwitcherCloseWatchdog = null;
@@ -773,8 +784,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 detachTaskSwitcher("watchdog");
             }
         };
-        mainHandler.postDelayed(taskSwitcherCloseWatchdog,
-                RETRACT_DURATION_MS + 250L);
+        mainHandler.postDelayed(taskSwitcherCloseWatchdog, delayMs);
     }
 
     /**
@@ -815,6 +825,64 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         view.getViewTreeObserver().addOnDrawListener(switcherFirstDrawListener);
     }
 
+    /**
+     * 等面板把手柄重绘出来之后再摘抽屉窗口。
+     *
+     * 面板从 INVISIBLE 恢复需要一次遍历才把内容画进 surface，而摘窗是立即生效的
+     * WM 调用：两者落在不同帧就会露出一帧"抽屉没了、手柄还没画"的空档
+     * （2026-11-18 慢放实测 f179；原速复测 6 轮里还复现 1 次 f133，说明盲等 34ms
+     * 不可靠）。改为挂在面板的 OnDrawListener 上：面板这一帧画出手柄，紧接着摘窗。
+     * 另设兜底超时，面板若始终不画（未布局等异常）也不至于把窗口留在屏幕上。
+     */
+    private void removeSwitcherWindowAfterPanelDraw(final TaskSwitcherView removed) {
+        pendingSwitcherRemoval = removed;
+        switcherRemovalDone = false;
+        if (panelView != null && panelAttached) {
+            panelRedrawListener = new ViewTreeObserver.OnDrawListener() {
+                @Override
+                public void onDraw() {
+                    // onDraw 里不许直接改窗口（也不宜重入 WM），排到本帧绘制之后。
+                    mainHandler.post(() -> finishSwitcherWindowRemoval("panel_draw"));
+                }
+            };
+            ViewTreeObserver observer = panelView.getViewTreeObserver();
+            if (observer.isAlive()) {
+                observer.addOnDrawListener(panelRedrawListener);
+            }
+        }
+        mainHandler.postDelayed(() -> finishSwitcherWindowRemoval("timeout"),
+                SWITCHER_HANDOFF_DELAY_MS);
+    }
+
+    private void finishSwitcherWindowRemoval(String reason) {
+        if (switcherRemovalDone) {
+            return;
+        }
+        switcherRemovalDone = true;
+        TaskSwitcherView removed = pendingSwitcherRemoval;
+        pendingSwitcherRemoval = null;
+        if (panelView != null && panelRedrawListener != null) {
+            final ViewTreeObserver.OnDrawListener listener = panelRedrawListener;
+            panelRedrawListener = null;
+            panelView.post(() -> {
+                ViewTreeObserver observer = panelView.getViewTreeObserver();
+                if (observer.isAlive()) {
+                    observer.removeOnDrawListener(listener);
+                }
+            });
+        }
+        if (removed != null) {
+            try {
+                windowManager.removeViewImmediate(removed);
+            } catch (RuntimeException ignored) {
+                // The accessibility window may already have been detached.
+            }
+        }
+        taskSwitcherAttached = false;
+        taskSwitcherOpen = false;
+        log.info("TASK_SWITCHER", "window_removed=" + reason);
+    }
+
     private void cancelSwitcherCloseWatchdog() {
         if (taskSwitcherCloseWatchdog != null) {
             mainHandler.removeCallbacks(taskSwitcherCloseWatchdog);
@@ -839,8 +907,14 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             taskSwitcherMorphAnimator = null;
         }
         final boolean closing = to < from;
+        final long duration = RETRACT_DURATION_MS;
         ValueAnimator animator = ValueAnimator.ofFloat(from, to);
-        animator.setDuration(RETRACT_DURATION_MS);
+        animator.setDuration(duration);
+        if (closing) {
+            // 看门狗必须和动画同源计时：曾经是两个独立常量，改动画时长就会让
+            // 看门狗在动画中途把窗口摘掉（真机 show=0 reason=watchdog）。
+            scheduleSwitcherCloseWatchdog(duration + 250L);
+        }
         animator.setInterpolator(RETRACT_EASE);
         animator.addUpdateListener(a -> {
             if (taskSwitcherView == null) {
