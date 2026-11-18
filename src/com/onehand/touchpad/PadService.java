@@ -282,6 +282,13 @@ public final class PadService extends AccessibilityService {
                 && service.controller.probeSequenceStep(sequence);
     }
 
+    static void refreshGestureExclusion() {
+        PadService service = instance;
+        if (service != null && service.controller != null) {
+            service.controller.refreshGestureExclusion();
+        }
+    }
+
     static boolean toggleProbeExclusion() {
         PadService service = instance;
         return service != null && service.controller != null

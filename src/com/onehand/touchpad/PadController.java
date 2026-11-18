@@ -1332,7 +1332,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 && eventTime - lastHandleTapUpTime <= doubleTapTimeout
                 && Math.hypot(gestureDownRawX - lastHandleTapRawX,
                 gestureDownRawY - lastHandleTapRawY) < touchSlop;
-        if (secondTap) {
+        if (secondTap && prefs.getDoubleTapSwitcher()) {
             long doubleTapDt = Math.max(0L, eventTime - lastHandleTapUpTime);
             lastHandleTapUpTime = 0L;
             log.info("HANDLE_TAP", "kind=double_tap dt=" + doubleTapDt);
@@ -2420,10 +2420,27 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (panelView == null || panelParams == null || !panelAttached) {
             return;
         }
-        int width = panelParams.width;
-        int height = panelParams.height;
-        if (width <= 0 || height <= 0
-                || (width == gestureExclusionWidth && height == gestureExclusionHeight)) {
+        // 开关关掉时把排除清空（这块区域的返回手势会还给系统）。
+        boolean enabled = prefs.getGestureExclusion();
+        int width = enabled ? panelParams.width : 0;
+        int height = enabled ? panelParams.height : 0;
+        if (width <= 0 || height <= 0) {
+            // 0/0 表示"已清空"，避免每次布局更新都重复清一遍。
+            if (gestureExclusionWidth == 0 && gestureExclusionHeight == 0) {
+                return;
+            }
+            gestureExclusionWidth = 0;
+            gestureExclusionHeight = 0;
+            try {
+                panelView.setSystemGestureExclusionRects(Collections.emptyList());
+                log.info("GESTURE", "exclusion=off");
+            } catch (RuntimeException exception) {
+                log.warn("GESTURE", "exclusion=clear_failed "
+                        + exception.getClass().getSimpleName());
+            }
+            return;
+        }
+        if (width == gestureExclusionWidth && height == gestureExclusionHeight) {
             return;
         }
         gestureExclusionWidth = width;
@@ -2435,6 +2452,13 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         } catch (RuntimeException exception) {
             log.warn("GESTURE", "exclusion=failed " + exception.getClass().getSimpleName());
         }
+    }
+
+    /** 设置页切换开关后立刻生效，不必重建窗口：清掉缓存尺寸再按当前开关重报一次。 */
+    void refreshGestureExclusion() {
+        gestureExclusionWidth = -1;
+        gestureExclusionHeight = -1;
+        applyHandleGestureExclusion();
     }
 
     private void performPanelLayoutUpdate(long now) {

@@ -94,6 +94,8 @@ public final class SettingsActivity extends Activity {
     private boolean uiSyncInProgress;
     private Switch longPressDragCheckBox;
     private Switch clickModeSwitch;
+    private Switch gestureExclusionSwitch;
+    private Switch doubleTapSwitcherSwitch;
     private Switch shizukuInjectCheckBox;
     private Button sideButton;
     private TextView shizukuStatusText;
@@ -641,6 +643,73 @@ public final class SettingsActivity extends Activity {
         clickModeParams.gravity = Gravity.CENTER_VERTICAL;
         interactionCard.addView(clickModeSwitch, clickModeParams);
         ((TextView) clickLabels.getChildAt(0)).setLabelFor(clickModeSwitch.getId());
+        rowParams = matchHeight(dp(60));
+        rowParams.topMargin = dp(10);
+        content.addView(interactionCard, rowParams);
+
+        divider = new LinearLayout(this);
+        divider.setBackgroundColor(COLOR_DIVIDER);
+        content.addView(divider, matchHeight(dp(1)));
+
+        interactionCard = createSwitchRowLayout();
+        LinearLayout gestureExclusionLabels = createSwitchLabelGroup(
+                "屏蔽边缘手势", "从手柄起手的滑动不触发系统返回");
+        interactionCard.addView(gestureExclusionLabels, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        gestureExclusionSwitch = new Switch(this);
+        tintSwitch(gestureExclusionSwitch);
+        gestureExclusionSwitch.setId(View.generateViewId());
+        gestureExclusionSwitch.setShowText(false);
+        gestureExclusionSwitch.setMinHeight(dp(48));
+        gestureExclusionSwitch.setContentDescription(
+                "屏蔽边缘手势，从手柄起手的滑动不触发系统返回");
+        gestureExclusionSwitch.setChecked(settingsPrefs.getGestureExclusion());
+        gestureExclusionSwitch.setOnCheckedChangeListener((button, checked) -> {
+            if (uiSyncInProgress) return;
+            settingsPrefs.setGestureExclusion(checked);
+            ProbeLog.get().info("PREF", "gesture_exclusion=" + (checked ? "on" : "off"));
+            PadService.refreshGestureExclusion();
+        });
+        LinearLayout.LayoutParams gestureExclusionParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
+        gestureExclusionParams.gravity = Gravity.CENTER_VERTICAL;
+        interactionCard.addView(gestureExclusionSwitch, gestureExclusionParams);
+        ((TextView) gestureExclusionLabels.getChildAt(0)).setLabelFor(
+                gestureExclusionSwitch.getId());
+        rowParams = matchHeight(dp(60));
+        rowParams.topMargin = dp(10);
+        content.addView(interactionCard, rowParams);
+
+        divider = new LinearLayout(this);
+        divider.setBackgroundColor(COLOR_DIVIDER);
+        content.addView(divider, matchHeight(dp(1)));
+
+        interactionCard = createSwitchRowLayout();
+        LinearLayout doubleTapSwitcherLabels = createSwitchLabelGroup(
+                "双击打开任务面板", "双击侧边手柄查看最近使用的应用");
+        interactionCard.addView(doubleTapSwitcherLabels, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        doubleTapSwitcherSwitch = new Switch(this);
+        tintSwitch(doubleTapSwitcherSwitch);
+        doubleTapSwitcherSwitch.setId(View.generateViewId());
+        doubleTapSwitcherSwitch.setShowText(false);
+        doubleTapSwitcherSwitch.setMinHeight(dp(48));
+        doubleTapSwitcherSwitch.setContentDescription(
+                "双击打开任务面板，双击侧边手柄查看最近使用的应用");
+        doubleTapSwitcherSwitch.setChecked(settingsPrefs.getDoubleTapSwitcher());
+        doubleTapSwitcherSwitch.setOnCheckedChangeListener((button, checked) -> {
+            if (uiSyncInProgress) return;
+            settingsPrefs.setDoubleTapSwitcher(checked);
+            ProbeLog.get().info("PREF", "double_tap_switcher=" + (checked ? "on" : "off"));
+        });
+        LinearLayout.LayoutParams doubleTapSwitcherParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
+        doubleTapSwitcherParams.gravity = Gravity.CENTER_VERTICAL;
+        interactionCard.addView(doubleTapSwitcherSwitch, doubleTapSwitcherParams);
+        ((TextView) doubleTapSwitcherLabels.getChildAt(0)).setLabelFor(
+                doubleTapSwitcherSwitch.getId());
         rowParams = matchHeight(dp(60));
         rowParams.topMargin = dp(10);
         content.addView(interactionCard, rowParams);

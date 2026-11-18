@@ -50,6 +50,12 @@ final class Prefs {
     static final String LONG_PRESS_DRAG = "long_press_drag";
     static final String CLICK_MODE = "click_mode";
     static final boolean CLICK_MODE_DEFAULT = false;
+    /** 手柄区域的系统手势排除（Android 10+）：从手柄起手的边缘滑动不再被当成返回。 */
+    static final String GESTURE_EXCLUSION = "gesture_exclusion";
+    static final boolean GESTURE_EXCLUSION_DEFAULT = true;
+    /** 双击侧边手柄打开"最近使用"任务面板。 */
+    static final String DOUBLE_TAP_SWITCHER = "double_tap_switcher";
+    static final boolean DOUBLE_TAP_SWITCHER_DEFAULT = true;
     static final String INJECT_CHANNEL = "inject_channel";
     static final String INJECT_CHANNEL_A11Y = "a11y";
     static final String INJECT_CHANNEL_SHIZUKU = "shizuku";
@@ -170,6 +176,22 @@ final class Prefs {
 
     void setClickMode(boolean enabled) {
         preferences.edit().putBoolean(CLICK_MODE, enabled).apply();
+    }
+
+    boolean getGestureExclusion() {
+        return preferences.getBoolean(GESTURE_EXCLUSION, GESTURE_EXCLUSION_DEFAULT);
+    }
+
+    void setGestureExclusion(boolean enabled) {
+        preferences.edit().putBoolean(GESTURE_EXCLUSION, enabled).apply();
+    }
+
+    boolean getDoubleTapSwitcher() {
+        return preferences.getBoolean(DOUBLE_TAP_SWITCHER, DOUBLE_TAP_SWITCHER_DEFAULT);
+    }
+
+    void setDoubleTapSwitcher(boolean enabled) {
+        preferences.edit().putBoolean(DOUBLE_TAP_SWITCHER, enabled).apply();
     }
 
     boolean getDebugMode() {
