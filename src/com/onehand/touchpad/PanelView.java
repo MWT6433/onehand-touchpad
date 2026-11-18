@@ -61,6 +61,11 @@ final class PanelView extends View {
     private boolean mirrored;
     /** 手柄触摸识别余量（窗口比竖条宽出来的部分），朝屏幕内侧那一侧留白。 */
     private float handleTouchPad;
+    /**
+     * 只吃触摸、不画任何东西。手柄态的独立触摸窗用它：那扇窗只有竖条那么大
+     * （+ 内侧识别余量），竖条本身仍由面板窗绘制——窗口尺寸因此不必随状态变化。
+     */
+    private boolean touchOnly;
     private boolean adjustMode;
     private float contentAlpha = 1.0f;
     private float collapseW = -1f;
@@ -116,6 +121,15 @@ final class PanelView extends View {
         chevronPaint.setColor(CHEVRON_COLOR);
         chevronHaloPaint.setStrokeWidth(
                 Prefs.ARROW_CHEVRON_STROKE_DP * density * scale * CHEVRON_HALO_MULT);
+    }
+
+    void setTouchOnly(boolean touchOnly) {
+        this.touchOnly = touchOnly;
+        // 纯触摸层不该在无障碍树里多出一个节点。
+        setImportantForAccessibility(touchOnly
+                ? IMPORTANT_FOR_ACCESSIBILITY_NO
+                : IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        invalidate();
     }
 
     void setHandleTouchPad(float handleTouchPad) {
@@ -192,6 +206,9 @@ final class PanelView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
+        if (touchOnly) {
+            return;
+        }
         if (mode == MODE_HANDLE) {
             drawHandle(canvas);
         } else {
@@ -199,12 +216,21 @@ final class PanelView extends View {
         }
     }
 
+    /**
+     * 竖条在本窗口里的左边界。窗口比竖条宽出 {@code handleTouchPad}，余量永远留在
+     * 朝屏幕内侧那一侧，所以竖条的屏幕位置不随余量变化。
+     * 绘制和"手柄触摸层"的定位共用这一处，避免两套算法漂移。
+     */
+    float handleLeftInWindow(float windowWidth) {
+        float width = Math.min(windowWidth, handleWidth);
+        return mirrored ? windowWidth - handleTouchPad - width : handleTouchPad;
+    }
+
     private void drawHandle(Canvas canvas) {
         float width = Math.min(getWidth(), handleWidth);
         float height = Math.min(getHeight(), handleHeight);
         float radius = Math.min(cornerRadius, Math.min(width, height) / 2f);
-        // 窗口比竖条宽出 handleTouchPad：余量留内侧，竖条屏幕位置不动。
-        float left = mirrored ? getWidth() - handleTouchPad - width : handleTouchPad;
+        float left = handleLeftInWindow(getWidth());
         drawingRect.set(left, 0f, left + width, height);
         fillPaint.setColor(adjustMode ? CELL_FILL_ADJUST : handleColor);
         canvas.drawRoundRect(drawingRect, radius, radius, fillPaint);

@@ -97,6 +97,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private final int screenWidth;
     private final int screenHeight;
     private final float density;
+    /** 面板缩放（手柄/按钮跟着缩放，手柄触摸层也要用同一份）。 */
+    private final float panelScale;
     private final int edgeInset;
     private final int handleTouchPad;
     private final int handleWidth;
@@ -140,6 +142,17 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private State state = State.SETTLED;
     private boolean started;
     private boolean panelAttached;
+    /**
+     * 手柄态的独立触摸窗（只在非单击模式下存在）：大小 = 竖条 + 内侧识别余量。
+     * 面板窗一直是面板尺寸（432×617），不裁触摸的话竖条下方一大段空白也会吃触摸；
+     * 窗口尺寸又不能改（改尺寸会触发系统过渡动画），所以触摸交给这层小窗，
+     * 面板窗在吸下状态置 FLAG_NOT_TOUCHABLE。
+     */
+    private PanelView handleLayerView;
+    private WindowManager.LayoutParams handleLayerParams;
+    private boolean handleLayerAttached;
+    /** 手柄触摸层参数变过、等下一次布局统一推给 WindowManager。 */
+    private boolean handleLayerDirty;
     private boolean handleSuppressed;
     private boolean cursorAttached;
     private boolean sideToggleBarAttached;
@@ -286,6 +299,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         this.screenHeight = screenBounds.height();
 
         float k = prefs.getPanelScale();
+        this.panelScale = k;
         handleWidth = dp(prefs.getHandleWDp());
         panelWidth = Math.max(1, Math.round(Math.min(screenWidth * Prefs.PANEL_W_RATIO,
                 dp(Prefs.PANEL_WIDTH_MAX_DP)) * k));
@@ -364,6 +378,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         log.info("CLICK_MODE_WINDOW", "enabled=" + (clickModeWindow ? 1 : 0)
                 + " w=" + panelParams.width + " h=" + panelParams.height);
+        if (!clickModeWindow) {
+            attachHandleLayer();
+        }
         panelWindowType = addOverlayWindow(panelView, panelParams, "panel");
         panelAttached = panelWindowType != 0;
         if (panelAttached) {
@@ -384,11 +401,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         // 用 view alpha 而不是 setVisibility(INVISIBLE)：窗口里画好的手柄不会丢，恢复是瞬时的
         // （没有重绘延迟）。
         panelView.setAlpha(handleSuppressed ? 0f : 1f);
-        if (handleSuppressed) {
-            panelParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-        } else {
-            panelParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        if (handleLayerAttached) {
+            handleLayerView.setAlpha(handleSuppressed ? 0f : 1f);
         }
+        syncWindowTouchable();
         performPanelLayoutUpdate(SystemClock.uptimeMillis());
     }
 
@@ -502,6 +518,119 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             log.warn("PROBE", probe + " skipped reason=no_cursor");
         }
         return available;
+    }
+
+    /** 手柄态触摸层：与竖条同样大小的窗口，只吃触摸（自己不画）。 */
+    private void attachHandleLayer() {
+        if (handleLayerView == null) {
+            handleLayerView = new PanelView(context);
+            handleLayerView.configure(density, handleWidth, handleHeight, panelWidth, panelHeight,
+                    arrowBarHeight, gap, dp(Prefs.CORNER_RADIUS_DP),
+                    dp(Prefs.ARROW_CELL_BG_R_DP), Prefs.HANDLE_ALPHA, panelScale);
+            handleLayerView.setTouchOnly(true);
+            handleLayerView.setListener(this);
+        }
+        handleLayerView.setMirrored(isLeftEdge());
+        // 窗口本身就是"竖条 + 余量"，视图形参里的余量置 0（它不画东西）。
+        handleLayerView.setHandleTouchPad(0f);
+        handleLayerView.setHandleMode();
+        handleLayerParams = createPanelParams();
+        handleLayerParams.width = handleWidth + handleTouchPad;
+        handleLayerParams.height = handleHeight;
+        handleLayerParams.x = handleLayerX();
+        handleLayerParams.y = settledY;
+        if (!handleLayerAttached) {
+            // 先加触摸层，再加面板窗：后加的在上层，面板出来时盖住手柄。
+            addOverlayWindow(handleLayerView, handleLayerParams, "handle");
+            handleLayerAttached = true;
+        } else {
+            handleLayerDirty = true;
+        }
+    }
+
+    /** 手柄触摸层跟随停靠几何（吸下/调整位置时和面板窗同源）。 */
+    private void syncHandleLayerLayout() {
+        if (!handleLayerAttached || handleLayerParams == null || panelParams == null) {
+            return;
+        }
+        if (state != State.SETTLED && state != State.ADJUST) {
+            return; // 面板在外面时这层被面板盖住，不用跟
+        }
+        if (!"handle".equals(panelView.getModeName())) {
+            // 拉出的那一帧 panelParams.x 已经变成面板位置、状态还没切过去，
+            // 这时候照抄会把触摸层带到屏幕中间。
+            return;
+        }
+        int x = handleLayerX();
+        int y = panelParams.y;
+        if (handleLayerParams.x == x && handleLayerParams.y == y) {
+            return;
+        }
+        handleLayerParams.x = x;
+        handleLayerParams.y = y;
+        handleLayerDirty = true;
+    }
+
+    private void removeHandleLayer() {
+        if (handleLayerAttached) {
+            try {
+                windowManager.removeViewImmediate(handleLayerView);
+            } catch (IllegalArgumentException ignored) {
+                // 窗口可能已被系统移除。
+            }
+        }
+        handleLayerAttached = false;
+    }
+
+    /**
+     * 手柄触摸层在屏幕上的 x：竖条左边界再往"屏幕内侧"让出识别余量。
+     * 左柄竖条贴在窗口右端（余量在右），右柄贴在窗口左端（余量在左）。
+     */
+    private int handleLayerX() {
+        float barLeft = panelView.handleLeftInWindow(windowWidth);
+        float layerLeft = isLeftEdge() ? barLeft : barLeft - handleTouchPad;
+        return panelParams.x + Math.round(layerLeft);
+    }
+
+    private boolean applyTouchable(WindowManager.LayoutParams params, boolean touchable) {
+        int flags = params.flags;
+        boolean currently = (flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0;
+        if (currently == touchable) {
+            return false;
+        }
+        params.flags = touchable
+                ? (flags & ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+                : (flags | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
+        return true;
+    }
+
+    /**
+     * 谁吃触摸：面板在外面（PULLING/ACTIVE/ADJUST/RETRACTING）时面板窗吃，
+     * 吸下时交给手柄触摸层——面板窗在吸下状态是 NOT_TOUCHABLE，竖条下方的空白
+     * 才会把触摸还给下层应用。手柄被临时藏起（任务切换器打开）时两层都不吃。
+     */
+    private void syncWindowTouchable() {
+        if (panelParams == null || !panelAttached) {
+            return;
+        }
+        if (clickModeWindow) {
+            // 单击模式这扇小窗就是手柄本体，尺寸正好是竖条。
+            applyTouchable(panelParams, !handleSuppressed);
+            return;
+        }
+        applyTouchable(panelParams, state != State.SETTLED && !handleSuppressed);
+        if (handleLayerAttached) {
+            // 手势可能还挂在这层上（PULLING / ADJUST 都从手柄起手），所以这两个状态
+            // 必须保持可触摸；面板静止在外面时才关掉，把"点面板外收回"还给面板窗。
+            boolean layerTouchable = (state == State.SETTLED
+                    || state == State.PULLING || state == State.ADJUST)
+                    && !handleSuppressed;
+            if (applyTouchable(handleLayerParams, layerTouchable)) {
+                handleLayerDirty = true;
+            }
+        } else {
+            applyTouchable(panelParams, !handleSuppressed);
+        }
     }
 
     private WindowManager.LayoutParams createPanelParams() {
@@ -635,6 +764,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private void removePanelWindow() {
         cancelRetractAnimator();
+        removeHandleLayer();
         if (panelAttached) {
             try {
                 windowManager.removeViewImmediate(panelView);
@@ -1088,8 +1218,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         state = next;
         runtimeState = state.name();
         log.info("STATE", "from=" + from + " to=" + next.name());
+        syncWindowTouchable();
         if (state == State.SETTLED) {
             setHandleSuppressed(handleSuppressed);
+        } else if (panelAttached) {
+            performPanelLayoutUpdate(SystemClock.uptimeMillis());
         }
     }
 
@@ -2473,6 +2606,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             gestureExclusionHeight = 0;
             try {
                 panelView.setSystemGestureExclusionRects(Collections.emptyList());
+                if (handleLayerAttached) {
+                    handleLayerView.setSystemGestureExclusionRects(Collections.emptyList());
+                }
                 log.info("GESTURE", "exclusion=off");
             } catch (RuntimeException exception) {
                 log.warn("GESTURE", "exclusion=clear_failed "
@@ -2488,6 +2624,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         try {
             panelView.setSystemGestureExclusionRects(
                     Collections.singletonList(new Rect(0, 0, width, height)));
+            if (handleLayerAttached && handleLayerParams != null) {
+                handleLayerView.setSystemGestureExclusionRects(Collections.singletonList(
+                        new Rect(0, 0, handleLayerParams.width, handleLayerParams.height)));
+            }
             log.info("GESTURE", "exclusion=on w=" + width + " h=" + height);
         } catch (RuntimeException exception) {
             log.warn("GESTURE", "exclusion=failed " + exception.getClass().getSimpleName());
@@ -2504,6 +2644,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private void performPanelLayoutUpdate(long now) {
         lastLayoutUpdateTime = now;
         applyHandleGestureExclusion();
+        syncHandleLayerLayout();
         log.trace("WINDOW_GEOM", "x=" + panelParams.x + " y=" + panelParams.y
                 + " w=" + panelParams.width + " h=" + panelParams.height
                 + " mode=" + panelView.getModeName());
@@ -2512,6 +2653,14 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             windowManager.updateViewLayout(panelView, panelParams);
         } catch (IllegalArgumentException ignored) {
             // A concurrently removed overlay is reclaimed by the service lifecycle.
+        }
+        if (handleLayerAttached && handleLayerDirty) {
+            handleLayerDirty = false;
+            try {
+                windowManager.updateViewLayout(handleLayerView, handleLayerParams);
+            } catch (IllegalArgumentException ignored) {
+                // 窗口可能已被系统回收，等下次布局再对齐。
+            }
         }
         if (sideToggleBarAttached && state == State.ACTIVE) {
             sideToggleBarParams.x = panelParams.x;
