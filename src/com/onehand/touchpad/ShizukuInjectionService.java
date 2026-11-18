@@ -407,11 +407,32 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
             for (int i = 0; i < query.rows.size(); i++) {
                 rows[i] = query.rows.get(i).toTabSeparated();
             }
+            logTaskRows(rows);
             return rows;
         } catch (Throwable exception) {
             logTaskPath("list_tasks", false, shortTaskError(exception));
             return new String[0];
         }
+    }
+
+    /** 诊断：把交给上层的行按 "id:pkg:flags" 打一行，总量截断，避免日志刷屏。 */
+    private void logTaskRows(String[] rows) {
+        StringBuilder summary = new StringBuilder("n=" + rows.length);
+        for (String row : rows) {
+            String[] fields = row == null ? new String[0] : row.split("\t", 5);
+            if (fields.length != 5) {
+                summary.append(" | bad_row");
+                continue;
+            }
+            summary.append(" | ").append(fields[0]).append(':')
+                    .append(fields[1]).append(':').append(fields[4]);
+            if (summary.length() > 240) {
+                summary.append(" | ...");
+                break;
+            }
+        }
+        logTaskPath("rows", true, "");
+        log.info("TASK_ROWS", summary.toString());
     }
 
     @Override
@@ -796,7 +817,7 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
             String topActivity = top == null
                     ? packageName + "/?" : top.flattenToShortString();
             long lastActiveTime = lastActiveTime(task, lastActiveTimeField);
-            String flags = rows.isEmpty() ? "foreground" : "background";
+            String flags = "background";
             rows.add(new TaskRow(taskId, packageName, topActivity,
                     lastActiveTime, flags));
         }

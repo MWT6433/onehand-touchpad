@@ -10,9 +10,25 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.accessibility.AccessibilityEvent;
 
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+
 import rikka.shizuku.Shizuku;
 
 public final class PadService extends AccessibilityService {
+    private static final int MAX_RECENT_FOREGROUND_APPS = 8;
+    private static final Set<String> NON_APP_FOREGROUND_PACKAGES =
+            Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+                    "com.onehand.touchpad",
+                    "com.sec.android.app.launcher",
+                    "com.android.launcher",
+                    "com.android.launcher3",
+                    "com.google.android.apps.nexuslauncher",
+                    "com.android.systemui")));
     private static volatile PadService instance;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -28,6 +44,10 @@ public final class PadService extends AccessibilityService {
     private boolean shizukuListenersRegistered;
     private boolean replaceInjectorOnReconnect;
     private boolean handleSuppressed;
+    private final Object foregroundLock = new Object();
+    private final ArrayDeque<ForegroundApp> recentForegroundApps = new ArrayDeque<>();
+    private String lastForegroundPackage;
+    private long lastForegroundTimestampMs;
 
     @Override
     public void onServiceConnected() {
@@ -67,7 +87,76 @@ public final class PadService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // P0 intentionally has no event-driven behavior.
+        if (event == null
+                || event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                || event.getPackageName() == null) {
+            return;
+        }
+        String packageName = event.getPackageName().toString().trim();
+        if (packageName.isEmpty()) {
+            return;
+        }
+        if (NON_APP_FOREGROUND_PACKAGES.contains(packageName)) {
+            if (!"com.onehand.touchpad".equals(packageName)) {
+                clearForegroundPackage();
+            }
+            return;
+        }
+        recordForegroundPackage(packageName);
+    }
+
+    String currentForegroundPackage() {
+        synchronized (foregroundLock) {
+            return lastForegroundPackage;
+        }
+    }
+
+    String[] recentForegroundPackageRows() {
+        synchronized (foregroundLock) {
+            String[] rows = new String[recentForegroundApps.size()];
+            int index = 0;
+            for (ForegroundApp app : recentForegroundApps) {
+                rows[index++] = "-1\t" + app.packageName + "\t"
+                        + app.packageName + "/?\t" + app.lastSeenMs
+                        + "\tbackground";
+            }
+            return rows;
+        }
+    }
+
+    private void recordForegroundPackage(String packageName) {
+        long nowMs = System.currentTimeMillis();
+        synchronized (foregroundLock) {
+            Iterator<ForegroundApp> iterator = recentForegroundApps.iterator();
+            while (iterator.hasNext()) {
+                if (packageName.equals(iterator.next().packageName)) {
+                    iterator.remove();
+                }
+            }
+            recentForegroundApps.addFirst(new ForegroundApp(packageName, nowMs));
+            while (recentForegroundApps.size() > MAX_RECENT_FOREGROUND_APPS) {
+                recentForegroundApps.removeLast();
+            }
+            lastForegroundPackage = packageName;
+            lastForegroundTimestampMs = nowMs;
+        }
+    }
+
+    private void clearForegroundPackage() {
+        synchronized (foregroundLock) {
+            lastForegroundPackage = null;
+            lastForegroundTimestampMs = 0L;
+        }
+    }
+
+    private static final class ForegroundApp {
+        final String packageName;
+        final long lastSeenMs;
+
+        ForegroundApp(String packageName, long lastSeenMs) {
+            this.packageName = packageName;
+            this.lastSeenMs = lastSeenMs;
+        }
     }
 
     @Override

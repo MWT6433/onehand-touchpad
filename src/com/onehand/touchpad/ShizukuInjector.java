@@ -589,6 +589,33 @@ final class ShizukuInjector implements Injector {
      * 返回 taskId\tpkg\ttopActivity\tlastActiveTimeMs\tflags 的数组。
      * Shizuku 尚未就绪或 binder 已断开时返回空数组，不向调用方抛异常。
      */
+    /**
+     * 按需重连：装更新包、系统杀过服务之后，UserService 绑定会断成 not_connected，
+     * 而用户此时双击手柄只会看到回退列表。这里做一次有上限的等待（默认 250ms，
+     * 用户刚发起手势，这点延迟看不出来），连上就继续走真任务列表。
+     */
+    boolean ensureConnected(long timeoutMs) {
+        if (api != null) {
+            return true;
+        }
+        retryBind();
+        long deadline = SystemClock.uptimeMillis() + Math.max(0L, timeoutMs);
+        while (api == null && SystemClock.uptimeMillis() < deadline) {
+            try {
+                Thread.sleep(20L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (api == null) {
+            log.info("SHIZUKU_REBIND", "ok=0 reason=timeout");
+        } else {
+            log.info("SHIZUKU_REBIND", "ok=1");
+        }
+        return api != null;
+    }
+
     String[] listRecentTasks(int maxCount) {
         if (maxCount <= 0) {
             return new String[0];

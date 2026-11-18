@@ -27,6 +27,8 @@ final class TaskSwitcherView extends View {
     interface Listener {
         void onTaskSelected(int taskId);
 
+        void onTaskLaunchRequested(String packageName);
+
         boolean onTaskRemoveRequested(int taskId);
 
         void onDismissRequested();
@@ -36,7 +38,6 @@ final class TaskSwitcherView extends View {
     private static final int DRAWER_WIDTH_DP = 300;
     private static final int DRAWER_NARROW_SCREEN_DP = 340;
     private static final int DRAWER_NARROW_INSET_DP = 40;
-    private static final int DRAWER_EDGE_DP = 8;
     private static final int DRAWER_EDGE_GAP_DP = 24;
     private static final int DRAWER_CORNER_DP = 24;
     private static final int ROW_HEIGHT_DP = 68;
@@ -66,8 +67,8 @@ final class TaskSwitcherView extends View {
     private static final float TASK_CLOSE_STROKE_DP = 1.5f;
     private static final float TASK_CLOSE_LINE_DP = 2f;
 
-    private static final int SCRIM_COLOR = 0x6E0C0C0E;
-    private static final int DRAWER_COLOR = 0x665E5E5E;
+    private static final int SCRIM_COLOR = 0x990C0C0E;
+    private static final int DRAWER_COLOR = 0xEC5E5E5E;
     private static final int OUTER_STROKE_COLOR = 0xFF000000;
     private static final int INNER_STROKE_COLOR = 0x57FFFFFF;
     private static final int CURRENT_ROW_COLOR = 0xFF3070E8;
@@ -83,6 +84,7 @@ final class TaskSwitcherView extends View {
 
     private final PackageManager packageManager;
     private final boolean leftHandle;
+    private final String foregroundPackage;
     private final int screenWidth;
     private final int screenHeight;
     private final float scaledDensity;
@@ -123,11 +125,14 @@ final class TaskSwitcherView extends View {
     private int activePointerId = MotionEvent.INVALID_POINTER_ID;
     private float touchDownX;
     private float touchDownY;
+    private long openingTime;
 
     TaskSwitcherView(Context context, boolean leftHandle, int screenWidth,
-                     int screenHeight, int handleTop, String[] rows) {
+                     int screenHeight, int handleTop, String[] rows,
+                     String foregroundPackage) {
         super(context);
         this.leftHandle = leftHandle;
+        this.foregroundPackage = foregroundPackage;
         this.screenWidth = screenWidth;
         this.screenHeight = screenHeight;
         this.packageManager = context.getPackageManager();
@@ -149,8 +154,8 @@ final class TaskSwitcherView extends View {
                 ? Math.max(1f, screenWidth - dp(DRAWER_NARROW_INSET_DP))
                 : Math.min(preferredWidth, screenWidth);
         drawerLeft = leftHandle
-                ? dp(DRAWER_EDGE_DP)
-                : Math.max(0f, screenWidth - drawerWidth - dp(DRAWER_EDGE_DP));
+                ? 0f
+                : Math.max(0f, screenWidth - drawerWidth);
         layoutDrawer(handleTop);
 
         scrimPaint.setStyle(Paint.Style.FILL);
@@ -251,13 +256,19 @@ final class TaskSwitcherView extends View {
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
                     currentTop + rowHeight);
-            if (task.foreground) {
+            if (isForeground(task)) {
                 rowPaint.setColor(CURRENT_ROW_COLOR);
                 canvas.drawRoundRect(rowRect, rowCorner, rowCorner, rowPaint);
             }
             drawTaskRow(canvas, task, rowRect);
             currentTop += rowHeight + dp(ROW_GAP_DP);
         }
+    }
+
+    private boolean isForeground(TaskRow task) {
+        return foregroundPackage != null
+                && !foregroundPackage.isEmpty()
+                && foregroundPackage.equals(task.packageName);
     }
 
     private void drawTaskRow(Canvas canvas, TaskRow task, RectF row) {
@@ -267,19 +278,26 @@ final class TaskSwitcherView extends View {
         float textLeft;
         float textRight;
         if (leftHandle) {
-            float closeTouchRight = taskCloseCenterX() + closeTouchSize / 2f;
-            contentRight = Math.max(
-                    contentLeft + iconSize,
-                    closeTouchRight + dp(TEXT_GAP_DP) + iconSize);
-            iconLeft = contentRight - iconSize;
-            textLeft = contentRight + dp(TEXT_GAP_DP);
+            if (isClosable(task)) {
+                float closeTouchRight = taskCloseCenterX() + closeTouchSize / 2f;
+                contentRight = Math.max(
+                        contentLeft + iconSize,
+                        closeTouchRight + dp(TEXT_GAP_DP) + iconSize);
+                iconLeft = contentRight - iconSize;
+                textLeft = contentRight + dp(TEXT_GAP_DP);
+            } else {
+                iconLeft = contentLeft;
+                textLeft = iconLeft + iconSize + dp(TEXT_GAP_DP);
+            }
             textRight = row.right - dp(ROW_INNER_PADDING_DP);
             namePaint.setTextAlign(Paint.Align.RIGHT);
             subtitlePaint.setTextAlign(Paint.Align.RIGHT);
         } else {
             iconLeft = contentLeft;
             textLeft = iconLeft + iconSize + dp(TEXT_GAP_DP);
-            textRight = taskCloseCenterX() - closeSize / 2f - dp(TEXT_GAP_DP);
+            textRight = isClosable(task)
+                    ? taskCloseCenterX() - closeSize / 2f - dp(TEXT_GAP_DP)
+                    : row.right - dp(ROW_INNER_PADDING_DP);
             namePaint.setTextAlign(Paint.Align.LEFT);
             subtitlePaint.setTextAlign(Paint.Align.LEFT);
         }
@@ -289,12 +307,20 @@ final class TaskSwitcherView extends View {
         if (leftHandle) {
             drawTaskText(canvas, task, textLeft, textRight, row);
             drawTaskIcon(canvas, task, iconLeft, iconTop);
-            drawTaskClose(canvas, row);
+            if (isClosable(task)) {
+                drawTaskClose(canvas, row);
+            }
         } else {
             drawTaskIcon(canvas, task, iconLeft, iconTop);
             drawTaskText(canvas, task, textLeft, textRight, row);
-            drawTaskClose(canvas, row);
+            if (isClosable(task)) {
+                drawTaskClose(canvas, row);
+            }
         }
+    }
+
+    private boolean isClosable(TaskRow task) {
+        return task.taskId > 0;
     }
 
     private void drawTaskClose(Canvas canvas, RectF row) {
@@ -396,7 +422,7 @@ final class TaskSwitcherView extends View {
                 continue;
             }
             String packageName = fields[1].trim();
-            if (taskId <= 0 || packageName.isEmpty()) {
+            if ((taskId <= 0 && taskId != -1) || packageName.isEmpty()) {
                 continue;
             }
             if (seenPackages.contains(packageName)) {
@@ -421,8 +447,8 @@ final class TaskSwitcherView extends View {
             } catch (NameNotFoundException ignored) {
                 continue;
             }
-            tasks.add(new TaskRow(taskId, label, lastActiveTimeMs,
-                    "foreground".equals(fields[4]), icon));
+            tasks.add(new TaskRow(
+                    taskId, packageName, label, lastActiveTimeMs, icon));
         }
     }
 
@@ -470,8 +496,20 @@ final class TaskSwitcherView extends View {
         }
     }
 
+    /**
+     * 打开抽屉的那一手（双击手柄的第二次按下）会在窗口挂上之后继续把 UP 送进来，
+     * 落点正好在 × 的热区里 —— 真机实测会直接关掉首行任务（TASK_REMOVE ok=1 找不到人来点）。
+     * 因此凡 downTime 不晚于 openingTime 的事件，整段丢弃。
+     */
+    void setOpeningTime(long uptimeMillis) {
+        this.openingTime = uptimeMillis;
+    }
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (event.getDownTime() <= openingTime) {
+            return true;
+        }
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 activePointerId = event.getPointerId(0);
@@ -517,7 +555,11 @@ final class TaskSwitcherView extends View {
         }
         TaskRow row = taskAt(x, y);
         if (row != null) {
-            listener.onTaskSelected(row.taskId);
+            if (row.taskId > 0) {
+                listener.onTaskSelected(row.taskId);
+            } else {
+                listener.onTaskLaunchRequested(row.packageName);
+            }
         } else if (!drawerRect.contains(x, y)) {
             listener.onDismissRequested();
         }
@@ -529,7 +571,7 @@ final class TaskSwitcherView extends View {
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
                     currentTop + rowHeight);
-            if (taskCloseHit(rowRect, x, y)) {
+            if (isClosable(task) && taskCloseHit(rowRect, x, y)) {
                 return task;
             }
             currentTop += rowHeight + dp(ROW_GAP_DP);
@@ -543,7 +585,7 @@ final class TaskSwitcherView extends View {
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
                     currentTop + rowHeight);
-            if (taskRowHit(rowRect, x, y)) {
+            if (taskRowHit(task, rowRect, x, y)) {
                 return task;
             }
             currentTop += rowHeight + dp(ROW_GAP_DP);
@@ -560,8 +602,9 @@ final class TaskSwitcherView extends View {
                 && y <= row.centerY() + halfTouch;
     }
 
-    private boolean taskRowHit(RectF row, float x, float y) {
-        return row.contains(x, y) && !taskCloseHit(row, x, y);
+    private boolean taskRowHit(TaskRow task, RectF row, float x, float y) {
+        return row.contains(x, y)
+                && (!isClosable(task) || !taskCloseHit(row, x, y));
     }
 
     private void removeTaskRow(TaskRow task) {
@@ -640,17 +683,17 @@ final class TaskSwitcherView extends View {
 
     private static final class TaskRow {
         final int taskId;
+        final String packageName;
         final String label;
         final long lastActiveTimeMs;
-        final boolean foreground;
         final Bitmap icon;
 
-        TaskRow(int taskId, String label, long lastActiveTimeMs,
-                boolean foreground, Bitmap icon) {
+        TaskRow(int taskId, String packageName, String label,
+                long lastActiveTimeMs, Bitmap icon) {
             this.taskId = taskId;
+            this.packageName = packageName;
             this.label = label;
             this.lastActiveTimeMs = lastActiveTimeMs;
-            this.foreground = foreground;
             this.icon = icon;
         }
     }

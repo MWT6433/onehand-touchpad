@@ -7,6 +7,7 @@ import android.animation.AnimatorListenerAdapter;
 import android.animation.TimeInterpolator;
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.os.Handler;
@@ -69,6 +70,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static volatile String runtimeState = "未运行";
 
     private final Context context;
+    private final PadService service;
     private int statusBarHeightPx = -1;
     private final WindowManager windowManager;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -242,6 +244,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     PadController(Context context, Injector injector) {
         this.context = context;
+        this.service = context instanceof PadService ? (PadService) context : null;
         this.injector = injector;
         this.windowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
         this.prefs = new Prefs(context);
@@ -634,20 +637,31 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (taskSwitcherOpen || !started || !panelAttached || state != State.SETTLED) {
             return;
         }
+        String foregroundPackage = service == null
+                ? null : service.currentForegroundPackage();
         ShizukuInjector shizukuInjector = shizukuInjector();
-        if (shizukuInjector == null) {
-            log.info("TASK_SWITCHER", "show=0 reason=no_shizuku");
-            return;
-        }
-        String[] rows;
-        try {
-            rows = shizukuInjector.listRecentTasks(8);
-        } catch (Throwable exception) {
-            rows = new String[0];
-            log.warn("TASK_SWITCHER", "show=0 reason=list:"
-                    + exception.getClass().getSimpleName());
+        String[] rows = null;
+        boolean useA11yFallback = false;
+        if (shizukuInjector != null) {
+            // 重装/更新包后 Shizuku 的 UserService 绑定会断（真机实测 TASK_LIST ok=0
+            // reason=not_connected），先给一次很短的重连机会，免得首次双击只看到回退列表。
+            shizukuInjector.ensureConnected(250L);
+            try {
+                rows = shizukuInjector.listRecentTasks(8);
+            } catch (Throwable exception) {
+                log.warn("TASK_SWITCHER", "show=0 reason=list:"
+                        + exception.getClass().getSimpleName());
+            }
         }
         if (rows == null || rows.length == 0) {
+            useA11yFallback = true;
+            rows = service == null
+                    ? new String[0] : service.recentForegroundPackageRows();
+        }
+        String source = useA11yFallback ? "source=a11y" : "source=shizuku";
+        log.info("TASK_SWITCHER", source + " rows=" + rows.length
+                + " fg=" + (foregroundPackage == null ? "none" : foregroundPackage));
+        if (rows.length == 0) {
             log.info("TASK_SWITCHER", "show=0 reason=no_tasks");
             return;
         }
@@ -655,7 +669,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         TaskSwitcherView nextView;
         try {
             nextView = new TaskSwitcherView(context, isLeftEdge(), screenWidth,
-                    screenHeight, panelParams.y, rows);
+                    screenHeight, panelParams.y, rows, foregroundPackage);
         } catch (Throwable exception) {
             log.warn("TASK_SWITCHER", "show=0 reason=create:"
                     + exception.getClass().getSimpleName());
@@ -666,6 +680,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             return;
         }
         nextView.setListener(this);
+        nextView.setOpeningTime(gestureDownTime);
 
         try {
             setHandleSuppressed(true);
@@ -738,6 +753,31 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         log.info("TASK_SWITCH", "ok=" + (ok ? 1 : 0)
                 + " taskId=" + taskId + " reason=" + reason);
+        hideTaskSwitcher("select");
+    }
+
+    @Override
+    public void onTaskLaunchRequested(String packageName) {
+        boolean ok = false;
+        String reason = "invalid_package";
+        try {
+            if (packageName != null && !packageName.isEmpty()) {
+                Intent launchIntent =
+                        context.getPackageManager().getLaunchIntentForPackage(packageName);
+                if (launchIntent != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    context.startActivity(launchIntent);
+                    ok = true;
+                    reason = "none";
+                } else {
+                    reason = "no_launch_intent";
+                }
+            }
+        } catch (Throwable exception) {
+            reason = exception.getClass().getSimpleName();
+        }
+        log.info("TASK_SWITCH", "ok=" + (ok ? 1 : 0)
+                + " taskId=-1 package=" + packageName + " reason=" + reason);
         hideTaskSwitcher("select");
     }
 
