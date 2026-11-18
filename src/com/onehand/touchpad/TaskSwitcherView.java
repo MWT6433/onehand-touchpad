@@ -36,39 +36,51 @@ final class TaskSwitcherView extends View {
     }
 
     private static final int MAX_ROWS = 8;
-    private static final int DRAWER_WIDTH_DP = 300;
+    private static final int DRAWER_WIDTH_DP = 200;
     private static final int DRAWER_NARROW_SCREEN_DP = 340;
     private static final int DRAWER_NARROW_INSET_DP = 40;
     private static final int DRAWER_EDGE_GAP_DP = 24;
-    private static final int DRAWER_CORNER_DP = 24;
-    private static final int ROW_HEIGHT_DP = 68;
-    private static final int ROW_CORNER_DP = 18;
-    private static final int ROW_GAP_DP = 4;
-    private static final int ICON_SIZE_DP = 40;
-    private static final int ICON_CORNER_DP = 12;
-    private static final int DRAWER_PADDING_DP = 12;
-    private static final int ROW_INNER_PADDING_DP = 12;
+    private static final int DRAWER_CORNER_DP = 16;
+    private static final int ROW_HEIGHT_DP = 45;
+    private static final int ROW_CORNER_DP = 12;
+    private static final int ROW_GAP_DP = 3;
+    private static final int ICON_SIZE_DP = 27;
+    private static final int ICON_CORNER_DP = 8;
+    private static final int DRAWER_PADDING_DP = 8;
+    private static final int ROW_INNER_PADDING_DP = 8;
     private static final int ROW_ACTION_RESERVE_DP = 20;
-    private static final int TASK_CLOSE_SIZE_DP = 30;
+    private static final int TASK_CLOSE_SIZE_DP = 20;
     private static final int TASK_CLOSE_TOUCH_DP = 44;
-    private static final int TASK_CLOSE_EDGE_DP = 26;
+    private static final int TASK_CLOSE_EDGE_DP = 18;
     /** 打开抽屉后的触摸静默窗：手指还在抬起途中，任何事件都不该被当成"点 ×"。 */
     private static final long OPEN_TOUCH_GUARD_MS = 220L;
-    private static final int TASK_CLOSE_MARK_DP = 10;
-    private static final int TITLE_TOP_DP = 14;
-    private static final int TITLE_LINE_HEIGHT_DP = 16;
-    private static final int TITLE_GAP_DP = 6;
-    private static final int TEXT_GAP_DP = 12;
+    /** 形变起点用手柄的圆角，避免尺寸变化时圆角跳一下。 */
+    private static final int HANDLE_CORNER_DP = 28;
+    /** 方向二：当前行不再整行填蓝，改成 16% 蓝底 + 内侧 3dp 指示条。 */
+    private static final int CURRENT_ROW_TINT_COLOR = 0x293070E8;
+    private static final int SEPARATOR_COLOR = 0x22FFFFFF;
+    private static final float ROW_BAR_DP = 3f;
+    private static final float ROW_BAR_INSET_DP = 10f;
+    /** × 静息 35%，当前行 / 按下行才变实。 */
+    private static final int CLOSE_REST_ALPHA = 0x59;
+    private static final int CLOSE_ACTIVE_ALPHA = 0xE6;
+    /** 内容在形变的这一段里淡入淡出，与面板收回同源（0.45）。 */
+    private static final float MORPH_CONTENT_START = 0.45f;
+    private static final int TASK_CLOSE_MARK_DP = 7;
+    private static final int TITLE_TOP_DP = 7;
+    private static final int TITLE_LINE_HEIGHT_DP = 12;
+    private static final int TITLE_GAP_DP = 4;
+    private static final int TEXT_GAP_DP = 8;
     private static final int TEXT_LINE_GAP_DP = 2;
     private static final int ICON_CACHE_LIMIT = 16;
     private static final long SUBTITLE_MAX_AGE_MS =
             365L * 24L * 60L * 60L * 1000L;
-    private static final float TITLE_SIZE_SP = 11f;
-    private static final float NAME_SIZE_SP = 15f;
-    private static final float SUBTITLE_SIZE_SP = 11f;
+    private static final float TITLE_SIZE_SP = 10f;
+    private static final float NAME_SIZE_SP = 13f;
+    private static final float SUBTITLE_SIZE_SP = 10f;
     private static final float INNER_STROKE_DP = 0.35f;
-    private static final float TASK_CLOSE_STROKE_DP = 1.5f;
-    private static final float TASK_CLOSE_LINE_DP = 2f;
+    private static final float TASK_CLOSE_STROKE_DP = 1.2f;
+    private static final float TASK_CLOSE_LINE_DP = 1.6f;
 
     private static final int SCRIM_COLOR = 0x990C0C0E;
     private static final int DRAWER_COLOR = 0xEC5E5E5E;
@@ -91,6 +103,21 @@ final class TaskSwitcherView extends View {
     private final int screenWidth;
     private final int screenHeight;
     private final float scaledDensity;
+    /** 面板缩放 k（设置页那一档），抽屉的每个几何量都乘它。 */
+    private final float scale;
+    /** 打开/收起形变进度：0 = 手柄矩形，1 = 抽屉矩形。 */
+    private float morph = 1f;
+    /** 形变起点（手柄矩形），由控制器在开窗时写入。 */
+    private final RectF handleRect = new RectF();
+    private final RectF morphRect = new RectF();
+    private final RectF barRect = new RectF();
+    private final Path morphClipPath = new Path();
+    private final Paint rowTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint separatorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** 收起动画期间不再接受触摸。 */
+    private boolean interactive = true;
+    /** 当前行 × 的透明度（静息 35%，当前行/按下行变实）。 */
+    private int closeAlpha = CLOSE_ACTIVE_ALPHA;
     private final float rowHeight;
     private final float iconSize;
     private final float iconCorner;
@@ -133,8 +160,9 @@ final class TaskSwitcherView extends View {
 
     TaskSwitcherView(Context context, boolean leftHandle, int screenWidth,
                      int screenHeight, int handleTop, String[] rows,
-                     String foregroundPackage) {
+                     String foregroundPackage, float scale) {
         super(context);
+        this.scale = Math.max(0.1f, scale);
         this.leftHandle = leftHandle;
         this.foregroundPackage = foregroundPackage;
         this.screenWidth = screenWidth;
@@ -149,14 +177,13 @@ final class TaskSwitcherView extends View {
         this.drawerCorner = dp(DRAWER_CORNER_DP);
         this.innerStrokeWidth = Math.max(1f, INNER_STROKE_DP * density());
         this.closeSize = dp(TASK_CLOSE_SIZE_DP);
-        this.closeTouchSize = dp(TASK_CLOSE_TOUCH_DP);
+        this.closeTouchSize = dpx(TASK_CLOSE_TOUCH_DP);
         this.touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         loadTasks(rows);
 
-        float preferredWidth = dp(DRAWER_WIDTH_DP);
-        drawerWidth = screenWidth < dp(DRAWER_NARROW_SCREEN_DP)
-                ? Math.max(1f, screenWidth - dp(DRAWER_NARROW_INSET_DP))
-                : Math.min(preferredWidth, screenWidth);
+        // 基础宽 200dp × k；再小的屏也不超过 88% 屏宽。
+        drawerWidth = Math.max(1f,
+                Math.min(dp(DRAWER_WIDTH_DP), screenWidth * 0.88f));
         drawerLeft = leftHandle
                 ? 0f
                 : Math.max(0f, screenWidth - drawerWidth);
@@ -175,6 +202,10 @@ final class TaskSwitcherView extends View {
         rowPaint.setStyle(Paint.Style.FILL);
         closeCirclePaint.setStyle(Paint.Style.STROKE);
         closeCirclePaint.setStrokeWidth(dp(TASK_CLOSE_STROKE_DP));
+        rowTintPaint.setStyle(Paint.Style.FILL);
+        rowTintPaint.setColor(CURRENT_ROW_TINT_COLOR);
+        separatorPaint.setStyle(Paint.Style.FILL);
+        separatorPaint.setColor(SEPARATOR_COLOR);
         closeCirclePaint.setColor(TASK_CLOSE_STROKE_COLOR);
         closeLinePaint.setStyle(Paint.Style.STROKE);
         closeLinePaint.setStrokeWidth(dp(TASK_CLOSE_LINE_DP));
@@ -215,6 +246,34 @@ final class TaskSwitcherView extends View {
                 drawerLeft + drawerWidth, drawerTop + drawerHeight);
     }
 
+    /** 形变起点：手柄矩形（由控制器开窗时写入）。 */
+    void setHandleRect(RectF rect) {
+        handleRect.set(rect);
+        invalidate();
+    }
+
+    /** 0 = 手柄、1 = 抽屉；由控制器用同一套缓动驱动。 */
+    void setMorph(float progress) {
+        float clamped = Math.max(0f, Math.min(1f, progress));
+        if (Math.abs(clamped - morph) < 0.001f) {
+            return;
+        }
+        morph = clamped;
+        invalidate();
+    }
+
+    /**
+     * 是否接受触摸，由控制器显式开关。
+     *
+     * 之前这里是「morph >= 1f 就接受」，而动画最后一帧落在 0.9999，控制器随后调
+     * setMorph(1f) 时被上面的 0.001 阈值提前返回 ⇒ interactive 永久为 false ⇒
+     * 全屏窗口吞掉所有触摸，抽屉关不掉、整屏点不动（2026-11-18 真机事故）。
+     * 交互状态不能从动画进度推导，必须独立设置。
+     */
+    void setInteractive(boolean value) {
+        interactive = value;
+    }
+
     void setListener(Listener listener) {
         this.listener = listener;
     }
@@ -231,40 +290,113 @@ final class TaskSwitcherView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
         if (tasks.isEmpty()) {
+            canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
             return;
         }
 
-        canvas.drawRoundRect(drawerRect, drawerCorner, drawerCorner, drawerPaint);
-        canvas.drawRoundRect(drawerRect, drawerCorner, drawerCorner,
-                outerStrokePaint);
-        innerStrokeRect.set(drawerRect);
+        // 形变：0 = 手柄矩形、1 = 抽屉矩形。和面板收回同一套（rect 插值 + 内容淡入淡出）。
+        float contentAlpha = 1f;
+        RectF card = drawerRect;
+        float corner = drawerCorner;
+        if (morph < 1f && !handleRect.isEmpty()) {
+            contentAlpha = Math.max(0f,
+                    Math.min(1f, (morph - MORPH_CONTENT_START) / (1f - MORPH_CONTENT_START)));
+            morphRect.set(
+                    handleRect.left + (drawerRect.left - handleRect.left) * morph,
+                    handleRect.top + (drawerRect.top - handleRect.top) * morph,
+                    handleRect.right + (drawerRect.right - handleRect.right) * morph,
+                    handleRect.bottom + (drawerRect.bottom - handleRect.bottom) * morph);
+            card = morphRect;
+            float handleCorner = dp(HANDLE_CORNER_DP);
+            corner = handleCorner + (drawerCorner - handleCorner) * morph;
+        }
+
+        scrimPaint.setAlpha(Math.round(0x99 * contentAlpha));
+        canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
+        scrimPaint.setAlpha(0x99);
+
+        canvas.drawRoundRect(card, corner, corner, drawerPaint);
+        canvas.drawRoundRect(card, corner, corner, outerStrokePaint);
+        innerStrokeRect.set(card);
         innerStrokeRect.inset(dp(1), dp(1));
         canvas.drawRoundRect(innerStrokeRect,
-                Math.max(0f, drawerCorner - dp(1)),
-                Math.max(0f, drawerCorner - dp(1)), innerStrokePaint);
+                Math.max(0f, corner - dp(1)), Math.max(0f, corner - dp(1)),
+                innerStrokePaint);
 
-        titlePaint.setTextAlign(leftHandle ? Paint.Align.RIGHT : Paint.Align.LEFT);
-        float titleX = leftHandle
-                ? drawerLeft + drawerWidth - dp(TITLE_TOP_DP)
-                : drawerLeft + dp(TITLE_TOP_DP);
-        float titleTop = drawerTop + dp(TITLE_TOP_DP);
+        int restoreTo = canvas.save();
+        if (card != drawerRect && morph < 1f) {
+            morphClipPath.reset();
+            morphClipPath.addRoundRect(card, corner, corner, Path.Direction.CW);
+            canvas.clipPath(morphClipPath);
+            // 内容按抽屉坐标排版，这里缩放进正在形变的矩形，于是"窄条长成卡片"是连续的
+            float scaleX = drawerWidth > 0f ? card.width() / drawerWidth : 1f;
+            float scaleY = drawerHeight > 0f ? card.height() / drawerHeight : 1f;
+            canvas.translate(card.left, card.top);
+            canvas.scale(scaleX, scaleY);
+            canvas.translate(-drawerLeft, -drawerTop);
+        }
+        int contentLayer = contentAlpha < 1f
+                ? canvas.saveLayerAlpha(null, Math.round(255 * contentAlpha),
+                        Canvas.ALL_SAVE_FLAG)
+                : -1;
+
+        drawTitle(canvas);
+        drawRows(canvas);
+
+        if (contentLayer >= 0) {
+            canvas.restoreToCount(contentLayer);
+        }
+        canvas.restoreToCount(restoreTo);
+    }
+
+    private void drawTitle(Canvas canvas) {
+        titlePaint.setTextAlign(Paint.Align.LEFT);
+        // 小标题与图标列对齐：× 在行首时让过 × 列。
+        float titleInset = leftHandle
+                ? dp(TASK_CLOSE_EDGE_DP) + closeTouchSize / 2f + dp(TEXT_GAP_DP)
+                : dp(TITLE_TOP_DP);
         Paint.FontMetrics titleMetrics = titlePaint.getFontMetrics();
-        canvas.drawText("最近使用", titleX,
-                titleTop - titleMetrics.ascent, titlePaint);
+        canvas.drawText("最近使用", drawerLeft + titleInset,
+                drawerTop + dp(TITLE_TOP_DP) - titleMetrics.ascent, titlePaint);
+    }
 
+    private void drawRows(Canvas canvas) {
+        float lineLeft = drawerLeft + dp(DRAWER_PADDING_DP) + dp(ROW_INNER_PADDING_DP);
+        float lineRight = drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP)
+                - dp(ROW_INNER_PADDING_DP);
         float currentTop = drawerTop + rowsTop;
         for (int index = 0; index < tasks.size(); index++) {
             TaskRow task = tasks.get(index);
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
                     currentTop + rowHeight);
-            if (isForeground(task)) {
-                rowPaint.setColor(CURRENT_ROW_COLOR);
-                canvas.drawRoundRect(rowRect, rowCorner, rowCorner, rowPaint);
+            boolean foreground = isForeground(task);
+            // 方向二：细分割线；与当前行相邻的那条让开，避免 T 形接头。
+            if (index > 0 && !foreground && !isForeground(tasks.get(index - 1))) {
+                float lineY = currentTop - dp(ROW_GAP_DP) / 2f;
+                canvas.drawRect(lineLeft, lineY, lineRight, lineY + Math.max(1f, dp(0.5f)),
+                        separatorPaint);
             }
+            if (foreground) {
+                canvas.drawRoundRect(rowRect, rowCorner, rowCorner, rowTintPaint);
+                // 内侧 3dp 指示条（靠内那一侧，不压 ×）
+                float barInset = dp(ROW_BAR_INSET_DP);
+                float barWidth = dp(ROW_BAR_DP);
+                float barX = leftHandle
+                        ? rowRect.right - dp(2) - barWidth
+                        : rowRect.left + dp(2);
+                barRect.set(barX, rowRect.top + barInset,
+                        barX + barWidth, rowRect.bottom - barInset);
+                rowTintPaint.setColor(CURRENT_ROW_COLOR);
+                canvas.drawRoundRect(barRect, barWidth / 2f, barWidth / 2f, rowTintPaint);
+                rowTintPaint.setColor(CURRENT_ROW_TINT_COLOR);
+            }
+            namePaint.setFakeBoldText(foreground);
+            closeAlpha = foreground ? CLOSE_ACTIVE_ALPHA : CLOSE_REST_ALPHA;
             drawTaskRow(canvas, task, rowRect);
+            namePaint.setFakeBoldText(false);
+            closeAlpha = CLOSE_ACTIVE_ALPHA;
             currentTop += rowHeight + dp(ROW_GAP_DP);
         }
     }
@@ -328,6 +460,11 @@ final class TaskSwitcherView extends View {
     }
 
     private void drawTaskClose(Canvas canvas, RectF row) {
+        int strokeAlpha = closeCirclePaint.getAlpha();
+        int lineAlpha = closeLinePaint.getAlpha();
+        closeCirclePaint.setAlpha(closeAlpha);
+        // 圆环本身是半透明的 0x6B，乘上 closeAlpha 才是最终观感
+        closeLinePaint.setAlpha(Math.min(255, closeAlpha + 40));
         float centerX = taskCloseCenterX();
         float centerY = row.centerY();
         canvas.drawCircle(centerX, centerY, closeSize / 2f, closeCirclePaint);
@@ -336,6 +473,8 @@ final class TaskSwitcherView extends View {
                 centerX + markRadius, centerY + markRadius, closeLinePaint);
         canvas.drawLine(centerX - markRadius, centerY + markRadius,
                 centerX + markRadius, centerY - markRadius, closeLinePaint);
+        closeCirclePaint.setAlpha(strokeAlpha);
+        closeLinePaint.setAlpha(lineAlpha);
     }
 
     private float taskCloseCenterX() {
@@ -519,6 +658,10 @@ final class TaskSwitcherView extends View {
                 || SystemClock.uptimeMillis() - openedAtUptime < OPEN_TOUCH_GUARD_MS) {
             return true;
         }
+        if (!interactive) {
+            // 正在收起：窗口还在，但不再响应任何点击
+            return true;
+        }
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 activePointerId = event.getPointerId(0);
@@ -678,12 +821,19 @@ final class TaskSwitcherView extends View {
         return getResources().getDisplayMetrics().density;
     }
 
+    /** 几何量：跟随面板缩放 k。 */
     private float dp(float value) {
+        return value * density() * scale;
+    }
+
+    /** 不随 k 缩的量（触摸热区、描边下限）——无障碍底线不能跟着缩小。 */
+    private float dpx(float value) {
         return value * density();
     }
 
     private float sp(float value) {
-        return value * scaledDensity;
+        // 文字只放大不缩小：k<1 时几何缩了，字仍守住基础字号，否则真机上看不清。
+        return value * scaledDensity * Math.max(1f, scale);
     }
 
     private static float clamp(float value, float minimum, float maximum) {

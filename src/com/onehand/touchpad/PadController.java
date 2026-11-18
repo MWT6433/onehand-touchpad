@@ -9,6 +9,7 @@ import android.animation.ValueAnimator;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.PixelFormat;
+import android.graphics.RectF;
 import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
@@ -118,6 +119,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private WindowManager.LayoutParams sideToggleBarParams;
     private WindowManager.LayoutParams quickMenuParams;
     private WindowManager.LayoutParams taskSwitcherParams;
+    private ValueAnimator taskSwitcherMorphAnimator;
+    private Runnable taskSwitcherCloseWatchdog;
+    private final RectF taskSwitcherHandleRect = new RectF();
     private State state = State.SETTLED;
     private boolean started;
     private boolean panelAttached;
@@ -670,7 +674,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         TaskSwitcherView nextView;
         try {
             nextView = new TaskSwitcherView(context, isLeftEdge(), screenWidth,
-                    screenHeight, panelParams.y, rows, foregroundPackage);
+                    screenHeight, panelParams.y, rows, foregroundPackage,
+                    prefs.getPanelScale());
         } catch (Throwable exception) {
             log.warn("TASK_SWITCHER", "show=0 reason=create:"
                     + exception.getClass().getSimpleName());
@@ -710,6 +715,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
 
         taskSwitcherOpen = true;
+        applySwitcherHandleRect();
+        nextView.setHandleRect(taskSwitcherHandleRect);
+        nextView.setMorph(0f);
+        nextView.setInteractive(false);
+        startSwitcherMorph(0f, 1f, null);
         log.info("TASK_SWITCHER", "show=1 side=" + side
                 + " rows=" + nextView.getTaskCount()
                 + " handleY=" + panelParams.y);
@@ -724,6 +734,19 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             return;
         }
         taskSwitcherOpen = false;
+        cancelSwitcherCloseWatchdog();
+        if (taskSwitcherAttached && taskSwitcherView != null) {
+            // 与面板收回同一段运动：矩形缩回手柄、内容在前 45% 淡完，结束后再摘窗。
+            taskSwitcherView.setInteractive(false);
+            scheduleSwitcherCloseWatchdog();
+            startSwitcherMorph(1f, 0f, () -> detachTaskSwitcher(reason));
+            return;
+        }
+        detachTaskSwitcher(reason);
+    }
+
+    private void detachTaskSwitcher(String reason) {
+        cancelSwitcherCloseWatchdog();
         if (taskSwitcherAttached) {
             try {
                 windowManager.removeViewImmediate(taskSwitcherView);
@@ -737,6 +760,84 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         taskSwitcherWindowType = 0;
         setHandleSuppressed(false);
         log.info("TASK_SWITCHER", "show=0 reason=" + reason);
+    }
+
+    /**
+     * 关窗看门狗：收起动画一旦被打断（锁屏、动画器被取消、主线程卡顿），
+     * 这个全屏窗口会留在屏幕上吞掉所有触摸。兜底在 RETRACT + 250ms 后强制摘窗，
+     * 把最坏情况从"整屏点不动"压到半秒无响应。
+     */
+    private void scheduleSwitcherCloseWatchdog() {
+        cancelSwitcherCloseWatchdog();
+        taskSwitcherCloseWatchdog = () -> {
+            taskSwitcherCloseWatchdog = null;
+            if (taskSwitcherOpen || taskSwitcherAttached) {
+                log.warn("TASK_SWITCHER", "close_watchdog=forced_detach");
+                detachTaskSwitcher("watchdog");
+            }
+        };
+        mainHandler.postDelayed(taskSwitcherCloseWatchdog,
+                RETRACT_DURATION_MS + 250L);
+    }
+
+    private void cancelSwitcherCloseWatchdog() {
+        if (taskSwitcherCloseWatchdog != null) {
+            mainHandler.removeCallbacks(taskSwitcherCloseWatchdog);
+            taskSwitcherCloseWatchdog = null;
+        }
+    }
+
+    private void applySwitcherHandleRect() {
+        float left = isLeftEdge()
+                ? edgeInset
+                : Math.max(0f, screenWidth - edgeInset - handleWidth);
+        if (!isLeftEdge()) {
+            left = settledX;
+        }
+        taskSwitcherHandleRect.set(left, settledY,
+                left + handleWidth, settledY + handleHeight);
+    }
+
+    private void startSwitcherMorph(float from, float to, Runnable onClosed) {
+        if (taskSwitcherMorphAnimator != null) {
+            taskSwitcherMorphAnimator.cancel();
+            taskSwitcherMorphAnimator = null;
+        }
+        final boolean closing = to < from;
+        ValueAnimator animator = ValueAnimator.ofFloat(from, to);
+        animator.setDuration(RETRACT_DURATION_MS);
+        animator.setInterpolator(RETRACT_EASE);
+        animator.addUpdateListener(a -> {
+            if (taskSwitcherView == null) {
+                return;
+            }
+            taskSwitcherView.setMorph((float) a.getAnimatedValue());
+        });
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator a) {
+                if (taskSwitcherMorphAnimator == a) {
+                    taskSwitcherMorphAnimator = null;
+                }
+                if (closing) {
+                    if (onClosed != null) {
+                        onClosed.run();
+                    }
+                } else if (taskSwitcherView != null) {
+                    taskSwitcherView.setMorph(1f);
+                    taskSwitcherView.setInteractive(true);
+                }
+            }
+
+            @Override
+            public void onAnimationCancel(Animator a) {
+                if (taskSwitcherMorphAnimator == a) {
+                    taskSwitcherMorphAnimator = null;
+                }
+            }
+        });
+        taskSwitcherMorphAnimator = animator;
+        animator.start();
     }
 
     @Override
