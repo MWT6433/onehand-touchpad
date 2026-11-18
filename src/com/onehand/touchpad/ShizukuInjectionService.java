@@ -20,7 +20,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.Locale;
 
 import rikka.shizuku.ShizukuBinderWrapper;
@@ -797,6 +799,11 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
     private List<TaskRow> toTaskRows(List<?> tasks) {
         List<TaskRow> rows = new ArrayList<>();
         Field lastActiveTimeField = resolveLastActiveTimeField();
+        // "最近使用"只列还在跑的应用：系统会保留进程已死任务的任务记录（用于冷启动回去），
+        // 那些条目在用户直觉里属于"不存在的后台程序"。livePackages 为 null 表示拿不到
+        // 进程列表，此时退化成不过滤，宁可多列也不要把列表清空。
+        Set<String> livePackages = resolveLiveProcessPackages();
+        int skippedDead = 0;
         for (Object value : tasks) {
             if (!(value instanceof ActivityManager.RecentTaskInfo)) {
                 logTaskPath("task_row", false, "not_recent_task_info");
@@ -814,6 +821,10 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
             if (SELF_PACKAGE.equals(packageName) || isHomeTask(task)) {
                 continue;
             }
+            if (livePackages != null && !livePackages.contains(packageName)) {
+                skippedDead++;
+                continue;
+            }
             String topActivity = top == null
                     ? packageName + "/?" : top.flattenToShortString();
             long lastActiveTime = lastActiveTime(task, lastActiveTimeField);
@@ -821,7 +832,57 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
             rows.add(new TaskRow(taskId, packageName, topActivity,
                     lastActiveTime, flags));
         }
+        if (skippedDead > 0) {
+            log.info("TASK_FILTER", "skipped_dead=" + skippedDead + " live="
+                    + (livePackages == null ? -1 : livePackages.size()));
+        }
         return rows;
+    }
+
+    /**
+     * 当前仍有进程的包名集合（进程名可能是 pkg 或 pkg:service，统一归到 pkg）。
+     * 本类跑在 Shizuku 拉起的 shell 进程里，getRunningAppProcesses() 能拿到全部进程；
+     * 拿不到（返回 null / 抛错）时返回 null，由调用方退化为不过滤。
+     */
+    private Set<String> resolveLiveProcessPackages() {
+        try {
+            ActivityManager manager = null;
+            try {
+                manager = activityManagerFrom(currentApplication());
+            } catch (Throwable ignored) {
+                // 退到系统上下文再试一次
+            }
+            if (manager == null) {
+                Object activityThread = currentActivityThread();
+                if (activityThread == null) {
+                    return null;
+                }
+                Method getSystemContext = activityThread.getClass()
+                        .getDeclaredMethod("getSystemContext");
+                getSystemContext.setAccessible(true);
+                manager = activityManagerFrom(getSystemContext.invoke(activityThread));
+            }
+            List<ActivityManager.RunningAppProcessInfo> processes =
+                    manager.getRunningAppProcesses();
+            if (processes == null) {
+                logTaskPath("live_processes", false, "null_process_list");
+                return null;
+            }
+            Set<String> packages = new HashSet<>();
+            for (ActivityManager.RunningAppProcessInfo info : processes) {
+                if (info == null || info.processName == null) {
+                    continue;
+                }
+                int colon = info.processName.indexOf(':');
+                packages.add(colon > 0
+                        ? info.processName.substring(0, colon) : info.processName);
+            }
+            logTaskPath("live_processes", true, "");
+            return packages;
+        } catch (Throwable exception) {
+            logTaskPath("live_processes", false, shortTaskError(exception));
+            return null;
+        }
     }
 
     private Field resolveLastActiveTimeField() {
