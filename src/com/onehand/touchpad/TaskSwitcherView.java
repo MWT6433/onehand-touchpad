@@ -65,7 +65,18 @@ final class TaskSwitcherView extends View {
     private static final int CLOSE_REST_ALPHA = 0x59;
     private static final int CLOSE_ACTIVE_ALPHA = 0xE6;
     /** 内容在形变的这一段里淡入淡出，与面板收回同源（0.45）。 */
-    private static final float MORPH_CONTENT_START = 0.45f;
+    /**
+     * 内容与遮罩各自的"完全可见"形变进度。
+     *
+     * 两个都必须跟着卡片尺寸走：此前的实现是 contentAlpha = (morph-0.45)/0.55，
+     * 即"卡片长到 45% 才开始出现内容、收起时一过半就淡完"，真机慢放实测：
+     * 卡片还有 96% 宽时文字已经在淡（细节值 26.7→10.2），到 45% 就彻底空白，
+     * 之后 180ms 是一块空灰板在缩——用户看到的就是"闪一下"。
+     * 现在内容在 0→45% 之间淡入淡出（此时卡片还小、且随卡片一起缩放），
+     * 遮罩在 0→90% 之间铺开，末段两者一起自然收掉。
+     */
+    private static final float MORPH_CONTENT_FULL = 0.45f;
+    private static final float MORPH_SCRIM_FULL = 0.90f;
     private static final int TASK_CLOSE_MARK_DP = 7;
     private static final int TITLE_TOP_DP = 7;
     private static final int TITLE_LINE_HEIGHT_DP = 12;
@@ -335,8 +346,7 @@ final class TaskSwitcherView extends View {
         RectF card = drawerRect;
         float corner = drawerCorner;
         if (morph < 1f && !handleRect.isEmpty()) {
-            contentAlpha = Math.max(0f,
-                    Math.min(1f, (morph - MORPH_CONTENT_START) / (1f - MORPH_CONTENT_START)));
+            contentAlpha = smoothstep(0f, MORPH_CONTENT_FULL, morph);
             morphRect.set(
                     handleRect.left + (drawerRect.left - handleRect.left) * morph,
                     handleRect.top + (drawerRect.top - handleRect.top) * morph,
@@ -347,7 +357,9 @@ final class TaskSwitcherView extends View {
             corner = handleCorner + (drawerCorner - handleCorner) * morph;
         }
 
-        scrimPaint.setAlpha(Math.round(0x99 * contentAlpha));
+        // 遮罩走自己的曲线：挂到 contentAlpha 上会让末段"整屏突然一亮"。
+        float scrimAlpha = 0x99 * smoothstep(0f, MORPH_SCRIM_FULL, morph);
+        scrimPaint.setAlpha(Math.round(scrimAlpha));
         canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
         scrimPaint.setAlpha(0x99);
 
@@ -401,6 +413,15 @@ final class TaskSwitcherView extends View {
             canvas.restoreToCount(contentLayer);
         }
         canvas.restoreToCount(restoreTo);
+    }
+
+    /** 0→1 的平滑过渡（3t²-2t³），避免线性淡入淡出的"硬边"。 */
+    private static float smoothstep(float edge0, float edge1, float value) {
+        if (edge1 <= edge0) {
+            return value >= edge1 ? 1f : 0f;
+        }
+        float t = Math.max(0f, Math.min(1f, (value - edge0) / (edge1 - edge0)));
+        return t * t * (3f - 2f * t);
     }
 
     private static float lerp(float from, float to, float p) {
