@@ -644,8 +644,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         boolean useA11yFallback = false;
         if (shizukuInjector != null) {
             // 重装/更新包后 Shizuku 的 UserService 绑定会断（真机实测 TASK_LIST ok=0
-            // reason=not_connected），先给一次很短的重连机会，免得首次双击只看到回退列表。
-            shizukuInjector.ensureConnected(250L);
+            // reason=not_connected）。这里只发一次重连请求、不等结果（注入器不许阻塞），
+            // 连上之前本次先走无障碍回退列表，下一次双击就是真任务列表。
+            shizukuInjector.requestConnect();
             try {
                 rows = shizukuInjector.listRecentTasks(8);
             } catch (Throwable exception) {

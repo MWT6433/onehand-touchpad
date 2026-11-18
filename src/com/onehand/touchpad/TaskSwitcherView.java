@@ -8,6 +8,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.os.SystemClock;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
@@ -51,6 +52,8 @@ final class TaskSwitcherView extends View {
     private static final int TASK_CLOSE_SIZE_DP = 30;
     private static final int TASK_CLOSE_TOUCH_DP = 44;
     private static final int TASK_CLOSE_EDGE_DP = 26;
+    /** 打开抽屉后的触摸静默窗：手指还在抬起途中，任何事件都不该被当成"点 ×"。 */
+    private static final long OPEN_TOUCH_GUARD_MS = 220L;
     private static final int TASK_CLOSE_MARK_DP = 10;
     private static final int TITLE_TOP_DP = 14;
     private static final int TITLE_LINE_HEIGHT_DP = 16;
@@ -126,6 +129,7 @@ final class TaskSwitcherView extends View {
     private float touchDownX;
     private float touchDownY;
     private long openingTime;
+    private long openedAtUptime;
 
     TaskSwitcherView(Context context, boolean leftHandle, int screenWidth,
                      int screenHeight, int handleTop, String[] rows,
@@ -503,11 +507,16 @@ final class TaskSwitcherView extends View {
      */
     void setOpeningTime(long uptimeMillis) {
         this.openingTime = uptimeMillis;
+        this.openedAtUptime = SystemClock.uptimeMillis();
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        if (event.getDownTime() <= openingTime) {
+        // 两道闸：① 打开抽屉那一手的残余事件（downTime 早于开窗）；
+        // ② 开窗后的短静默窗 —— 抽屉是在手指按下之后才出现的，系统会给新窗口合成一个
+        //    带新 downTime 的 DOWN，只靠 ① 挡不住（真机实测 10 次双击里 4 次把首行关掉）。
+        if (event.getDownTime() <= openingTime
+                || SystemClock.uptimeMillis() - openedAtUptime < OPEN_TOUCH_GUARD_MS) {
             return true;
         }
         switch (event.getActionMasked()) {

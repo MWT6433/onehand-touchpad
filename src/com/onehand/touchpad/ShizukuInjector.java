@@ -590,30 +590,18 @@ final class ShizukuInjector implements Injector {
      * Shizuku 尚未就绪或 binder 已断开时返回空数组，不向调用方抛异常。
      */
     /**
-     * 按需重连：装更新包、系统杀过服务之后，UserService 绑定会断成 not_connected，
-     * 而用户此时双击手柄只会看到回退列表。这里做一次有上限的等待（默认 250ms，
-     * 用户刚发起手势，这点延迟看不出来），连上就继续走真任务列表。
+     * 按需重连：装更新包、系统杀过服务之后，UserService 绑定会断成 not_connected。
+     * 这里只发一次绑定请求，不阻塞调用线程 —— 注入器本来就不许用 sleep 卡时序
+     * （p18 的 "tap/swipe scheduling semantics changed" 守着这条）。连上之前
+     * 切换器会先显示无障碍回退列表，下一次双击就能拿到真任务列表。
      */
-    boolean ensureConnected(long timeoutMs) {
+    boolean requestConnect() {
         if (api != null) {
             return true;
         }
         retryBind();
-        long deadline = SystemClock.uptimeMillis() + Math.max(0L, timeoutMs);
-        while (api == null && SystemClock.uptimeMillis() < deadline) {
-            try {
-                Thread.sleep(20L);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-        }
-        if (api == null) {
-            log.info("SHIZUKU_REBIND", "ok=0 reason=timeout");
-        } else {
-            log.info("SHIZUKU_REBIND", "ok=1");
-        }
-        return api != null;
+        log.info("SHIZUKU_REBIND", "ok=0 reason=pending");
+        return false;
     }
 
     String[] listRecentTasks(int maxCount) {
