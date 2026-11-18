@@ -42,6 +42,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final int WINDOW_TYPE_APPLICATION_OVERLAY =
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
     private static final int HANDLE_EDGE_MARGIN_DP = 8;
+    // 手柄的触摸识别余量：手指落在竖条边缘、或略偏内侧一点时，仍然算点在
+    // 手柄上（原来窗口宽度正好等于竖条，右缘一过就不派发事件，双击老是失败）。
+    // 这笔余量是"吞掉的"，系统返回手势区域也随之扩大，1 个常量可调。
+    private static final int HANDLE_TOUCH_PAD_DP = 16;
     /** 抽屉挂上时的 alpha：不用 0，避免任何"零 alpha 不绘制"的优化把首帧回调吞掉。 */
     private static final float SWITCHER_ATTACH_ALPHA = 0.01f;
 
@@ -94,6 +98,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private final int screenHeight;
     private final float density;
     private final int edgeInset;
+    private final int handleTouchPad;
     private final int handleWidth;
     private final int handleHeight;
     private final int panelWidth;
@@ -111,6 +116,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private final int touchSlop;
     private final int tapTimeout;
     private final int doubleTapTimeout;
+    private final int doubleTapSlop;
     private final float followSlopPx;
     private final float pullTriggerPx;
     private final float echoRadiusPx;
@@ -270,6 +276,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         DisplayMetrics displayMetrics = context.getResources().getDisplayMetrics();
         this.density = displayMetrics.density;
         this.edgeInset = dp(HANDLE_EDGE_MARGIN_DP);
+        this.handleTouchPad = dp(HANDLE_TOUCH_PAD_DP);
         this.followSlopPx = FOLLOW_SLOP_MM * displayMetrics.xdpi / 25.4f;
         this.pullTriggerPx = PULL_TRIGGER_MM * displayMetrics.xdpi / 25.4f;
         this.echoRadiusPx = ECHO_RADIUS_DP * displayMetrics.density;
@@ -316,6 +323,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         ViewConfiguration viewConfiguration = ViewConfiguration.get(context);
         touchSlop = viewConfiguration.getScaledTouchSlop();
         tapTimeout = ViewConfiguration.getTapTimeout();
+        // 双击的"两次落点距离"要用系统给双击用的 slop（~100dp），
+        // 不是单指滑动的 touchSlop（~8dp）——后者会让稍微挪一点手指的双击失效。
+        doubleTapSlop = viewConfiguration.getScaledDoubleTapSlop();
         doubleTapTimeout = ViewConfiguration.getDoubleTapTimeout();
         cursorRadius = dp(Prefs.CURSOR_R_DP);
         outwardOffset = dp(Prefs.CURSOR_OUTWARD_OFFSET_DP);
@@ -340,14 +350,18 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         runtimeState = state.name();
         log.info("SIDE", "side=" + side + " settledX=" + settledX
                 + " windowW=" + windowWidth + " handleW=" + handleWidth);
+        panelView.setHandleTouchPad(handleTouchPad);
         panelView.setHandleMode();
         panelParams = createPanelParams();
-        panelParams.width = windowWidth;
+        // 宽度由 applyHandleWindowGeometry()（手柄态）或 createClickModeHandleParams()
+        // （单击模式）各自写下，这里不再重复写一遍。
         panelParams.height = windowHeight;
         panelParams.x = panelWindowX();
         panelParams.y = settledY;
         if (clickModeWindow) {
             panelParams = createClickModeHandleParams();
+        } else {
+            applyHandleWindowGeometry();
         }
         log.info("CLICK_MODE_WINDOW", "enabled=" + (clickModeWindow ? 1 : 0)
                 + " w=" + panelParams.width + " h=" + panelParams.height);
@@ -507,9 +521,12 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private WindowManager.LayoutParams createClickModeHandleParams() {
         WindowManager.LayoutParams params = createPanelParams();
-        params.width = handleWidth;
+        // 单击模式用的是独立小窗，同样要带识别余量（余量留在朝屏幕内侧那边）。
+        params.width = handleWidth + handleTouchPad;
         params.height = handleHeight;
-        params.x = panelWindowX();
+        params.x = isLeftEdge()
+                ? edgeInset
+                : Math.max(0, screenWidth - handleWidth - edgeInset - handleTouchPad);
         params.y = settledY;
         return params;
     }
@@ -1319,7 +1336,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                     Math.round(panelParams.y * 100f / Math.max(1, screenHeight - handleHeight))));
             prefs.setYPercent(yPercent);
             log.info("PREF", "side=" + side + " ypct=" + yPercent);
-            panelParams.x = panelWindowX();
+            applyHandleWindowGeometry();
             panelParams.y = yPercentToPixels(yPercent);
             settledY = panelParams.y;
             panelView.setAdjustMode(false);
@@ -1337,7 +1354,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         boolean secondTap = lastHandleTapUpTime > 0L
                 && eventTime - lastHandleTapUpTime <= doubleTapTimeout
                 && Math.hypot(gestureDownRawX - lastHandleTapRawX,
-                gestureDownRawY - lastHandleTapRawY) < touchSlop;
+                gestureDownRawY - lastHandleTapRawY) < doubleTapSlop;
         if (secondTap && prefs.getDoubleTapSwitcher()) {
             long doubleTapDt = Math.max(0L, eventTime - lastHandleTapUpTime);
             lastHandleTapUpTime = 0L;
@@ -1374,7 +1391,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             }
         } else if (state == State.ADJUST) {
             panelView.setAdjustMode(false);
-            panelParams.x = panelWindowX();
+            applyHandleWindowGeometry();
             panelParams.y = settledY;
             updatePanelLayout(true);
             transitionTo(State.SETTLED);
@@ -1520,6 +1537,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     private void beginPulling(float rawX, float rawY, float dx, float dy, float pullDistance) {
+        // 面板要从手柄里长出来：先把窗口宽度还原成面板宽度（x 下面按手指重算）。
+        applyPanelWindowGeometry();
         menuShownThisPull = false;
         boolean clickMode = prefs.getClickMode();
         pullClickMode = clickMode;
@@ -1704,7 +1723,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         panelView.setHandleMode();
         if (!clickMode) {
-            panelParams.x = panelWindowX();
+            applyHandleWindowGeometry();
             panelParams.y = settledY;
             updatePanelLayout(true);
         }
@@ -1933,6 +1952,29 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         return handleWidth;
     }
 
+    /**
+     * 手柄态的窗口几何：宽度多加 {@link #HANDLE_TOUCH_PAD_DP}，多出来的余量一律
+     * 留在"朝屏幕内侧"那一边，竖条本身的屏幕位置不动（偏移由 PanelView 负责）。
+     */
+    private void applyHandleWindowGeometry() {
+        if (panelParams == null) {
+            return;
+        }
+        panelParams.width = windowWidth + handleTouchPad;
+        panelParams.x = settledX - (isLeftEdge() ? 0 : handleTouchPad);
+    }
+
+    /**
+     * 面板态的窗口几何：回到面板自身宽度。面板内容是从窗口 x=0 画的，
+     * 和 panelParams.x 的语义一致，不能再带余量。
+     */
+    private void applyPanelWindowGeometry() {
+        if (panelParams == null) {
+            return;
+        }
+        panelParams.width = windowWidth;
+    }
+
     private int settledXForSide() {
         return isLeftEdge()
                 ? -(windowWidth - handleWidth) + edgeInset
@@ -1951,7 +1993,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         return isLeftEdge()
                 ? edgeInset
-                : Math.max(0, screenWidth - handleWidth - edgeInset);
+                : Math.max(0, screenWidth - handleWidth - edgeInset - handleTouchPad);
     }
 
     private float minPanelX() {
@@ -2339,7 +2381,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 if (state != State.RETRACTING) {
                     return;
                 }
-                panelParams.x = settledX;
+                applyHandleWindowGeometry();
                 panelParams.y = settledY;
                 panelView.setCollapseRect(handleWidth, handleHeight);
                 panelView.clearCollapseRect();

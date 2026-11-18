@@ -59,6 +59,8 @@ final class PanelView extends View {
     private int mode = MODE_HANDLE;
     private boolean touchIgnored;
     private boolean mirrored;
+    /** 手柄触摸识别余量（窗口比竖条宽出来的部分），朝屏幕内侧那一侧留白。 */
+    private float handleTouchPad;
     private boolean adjustMode;
     private float contentAlpha = 1.0f;
     private float collapseW = -1f;
@@ -114,6 +116,10 @@ final class PanelView extends View {
         chevronPaint.setColor(CHEVRON_COLOR);
         chevronHaloPaint.setStrokeWidth(
                 Prefs.ARROW_CHEVRON_STROKE_DP * density * scale * CHEVRON_HALO_MULT);
+    }
+
+    void setHandleTouchPad(float handleTouchPad) {
+        this.handleTouchPad = Math.max(0f, handleTouchPad);
     }
 
     void setMirrored(boolean mirrored) {
@@ -197,7 +203,8 @@ final class PanelView extends View {
         float width = Math.min(getWidth(), handleWidth);
         float height = Math.min(getHeight(), handleHeight);
         float radius = Math.min(cornerRadius, Math.min(width, height) / 2f);
-        float left = mirrored ? getWidth() - width : 0f;
+        // 窗口比竖条宽出 handleTouchPad：余量留内侧，竖条屏幕位置不动。
+        float left = mirrored ? getWidth() - handleTouchPad - width : handleTouchPad;
         drawingRect.set(left, 0f, left + width, height);
         fillPaint.setColor(adjustMode ? CELL_FILL_ADJUST : handleColor);
         canvas.drawRoundRect(drawingRect, radius, radius, fillPaint);
