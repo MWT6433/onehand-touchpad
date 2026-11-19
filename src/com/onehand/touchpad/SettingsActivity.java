@@ -96,6 +96,7 @@ public final class SettingsActivity extends Activity {
     private Switch clickModeSwitch;
     private Switch gestureExclusionSwitch;
     private Switch doubleTapSwitcherSwitch;
+    private Switch keyboardLiftSwitch;
     private Switch shizukuInjectCheckBox;
     private Button sideButton;
     private TextView shizukuStatusText;
@@ -295,6 +296,7 @@ public final class SettingsActivity extends Activity {
         content.addView(dashboardContainer);
         addGaugeGrid(dashboardContainer);
         buildHandlePositionRow(content);
+        buildKeyboardLiftRow(content);
         buildShizukuRow(content);
 
         switchRowsContainer = new LinearLayout(this);
@@ -730,6 +732,38 @@ public final class SettingsActivity extends Activity {
         taskHintParams.topMargin = dp(4);
         taskHintParams.bottomMargin = dp(6);
         content.addView(shizukuTaskHint, taskHintParams);
+    }
+
+    /** 键盘避让：键盘停靠时把手柄抬到键盘上方，收起后回原位。 */
+    private void buildKeyboardLiftRow(LinearLayout content) {
+        LinearLayout row = createSwitchRowLayout();
+        LinearLayout labels = createSwitchLabelGroup(
+                "键盘避让", "键盘弹出时手柄抬到键盘上方，收起后回原位");
+        row.addView(labels, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        keyboardLiftSwitch = new Switch(this);
+        tintSwitch(keyboardLiftSwitch);
+        keyboardLiftSwitch.setId(View.generateViewId());
+        keyboardLiftSwitch.setShowText(false);
+        keyboardLiftSwitch.setMinHeight(dp(48));
+        keyboardLiftSwitch.setContentDescription("键盘避让，键盘弹出时手柄抬到键盘上方");
+        keyboardLiftSwitch.setChecked(settingsPrefs.getKeyboardLift());
+        keyboardLiftSwitch.setOnCheckedChangeListener((button, checked) -> {
+            if (uiSyncInProgress) return;
+            settingsPrefs.setKeyboardLift(checked);
+            ProbeLog.get().info("PREF", "keyboard_lift=" + (checked ? "on" : "off"));
+            PadService.refreshKeyboardLiftNow();
+        });
+        LinearLayout.LayoutParams switchParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
+        switchParams.gravity = Gravity.CENTER_VERTICAL;
+        row.addView(keyboardLiftSwitch, switchParams);
+        ((TextView) labels.getChildAt(0)).setLabelFor(keyboardLiftSwitch.getId());
+
+        LinearLayout.LayoutParams rowParams = matchHeight(dp(60));
+        rowParams.topMargin = dp(10);
+        content.addView(row, rowParams);
     }
 
     /**

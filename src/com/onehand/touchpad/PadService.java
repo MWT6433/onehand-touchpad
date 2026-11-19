@@ -91,8 +91,16 @@ public final class PadService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event == null
-                || event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        if (event == null) {
+            return;
+        }
+        // 输入法窗口变化：停靠就抬柄、收起就回原位。事件很密，150ms 后再读一次当前状态
+        // （键盘弹出动画期间 bounds 会变几次）。
+        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+                || event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            scheduleImeCheck();
+        }
+        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
                 || event.getPackageName() == null) {
             return;
         }
@@ -122,6 +130,77 @@ public final class PadService extends AccessibilityService {
         PadController current = controller;
         if (current != null) {
             current.reassertGestureExclusion("window_state");
+        }
+    }
+
+    private int lastImeTop;
+    private boolean imeCheckPending;
+
+    private void scheduleImeCheck() {
+        if (imeCheckPending) {
+            return;
+        }
+        imeCheckPending = true;
+        mainHandler.postDelayed(() -> {
+            imeCheckPending = false;
+            refreshImeState();
+        }, 150L);
+    }
+
+    /**
+     * 读当前输入法窗口的顶边（屏幕坐标）。没有键盘、或键盘浮起（没占满屏宽）都算"没挡住"。
+     *
+     * <p>窗口枚举要 canRetrieveWindowContent + flagRetrieveInteractiveWindows（实测缺一个就恒空），
+     * 本地裁剪过的 android.jar 里又没有 AccessibilityWindow，只能反射。
+     */
+    static int readImeTopPx(AccessibilityService service, int screenWidth) {
+        if (service == null) {
+            return -1;
+        }
+        try {
+            java.util.List<?> windows = service.getWindows();
+            for (Object window : windows) {
+                Class<?> type = window.getClass();
+                if (!Integer.valueOf(2).equals(type.getMethod("getType").invoke(window))) {
+                    continue; // TYPE_INPUT_METHOD
+                }
+                android.graphics.Rect bounds = new android.graphics.Rect();
+                type.getMethod("getBoundsInScreen", android.graphics.Rect.class)
+                        .invoke(window, bounds);
+                boolean docked = bounds.left <= 0 && bounds.right >= screenWidth;
+                if (docked && bounds.height() > 0) {
+                    return bounds.top;
+                }
+            }
+        } catch (Throwable ignored) {
+            // 拿不到窗口就当没有键盘，保持现状。
+        }
+        return -1;
+    }
+
+    /** 立即按当前键盘状态重算（开关拨动、重建控制器后调）。 */
+    static void refreshImeState() {
+        PadService service = instance;
+        if (service == null) {
+            return;
+        }
+        PadController current = service.controller;
+        if (current == null) {
+            return;
+        }
+        int top = readImeTopPx(service, current.screenWidth());
+        if (top == service.lastImeTop) {
+            return;
+        }
+        service.lastImeTop = top;
+        current.refreshKeyboardLift(top);
+    }
+
+    static void refreshKeyboardLiftNow() {
+        PadService service = instance;
+        if (service != null) {
+            service.lastImeTop = Integer.MIN_VALUE;
+            service.scheduleImeCheck();
         }
     }
 
@@ -237,6 +316,13 @@ public final class PadService extends AccessibilityService {
         }
         service.mainHandler.post(() -> service.controller.switchSideNow(side));
         return true;
+    }
+
+    static void resetImeCacheForNewController() {
+        PadService service = instance;
+        if (service != null) {
+            service.lastImeTop = Integer.MIN_VALUE;
+        }
     }
 
     static boolean reloadController() {

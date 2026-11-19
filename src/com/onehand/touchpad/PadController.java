@@ -115,6 +115,13 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private final int windowHeight;
     private int settledX;
     private int settledY;
+    /** 键盘会话：键盘停靠时把显示位置抬到键盘上方，收起时回到进键盘前的位置。 */
+    private static final int KEYBOARD_LIFT_ANIM_MS = 180;
+    private static final int KEYBOARD_LIFT_GAP_DP = 8;
+    private boolean imeVisible;
+    private int imeTopPx = -1;
+    private int imeSavedY = -1;
+    private android.animation.ValueAnimator imeAnimator;
     private final int arrowSwipeVertical;
     private final int arrowSwipeHorizontal;
     private final int touchSlop;
@@ -1519,10 +1526,17 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (state == State.ADJUST) {
             int yPercent = Math.max(0, Math.min(100,
                     Math.round(panelParams.y * 100f / Math.max(1, screenHeight - handleHeight))));
-            prefs.setYPercent(yPercent);
-            log.info("PREF", "side=" + side + " ypct=" + yPercent);
+            if (imeVisible) {
+                // 键盘会话期间的拖动是临时的：不落盘，收起键盘时回到原位置。
+                log.info("KEYBOARD", "adjust_ignored px=" + panelParams.y);
+            } else {
+                prefs.setYPercent(yPercent);
+                log.info("PREF", "side=" + side + " ypct=" + yPercent);
+            }
             applyHandleWindowGeometry();
-            panelParams.y = yPercentToPixels(yPercent);
+            if (!imeVisible) {
+                panelParams.y = yPercentToPixels(yPercent);
+            }
             settledY = panelParams.y;
             panelView.setAdjustMode(false);
             log.info("ADJUST_END", "ypct=" + yPercent + " px=" + panelParams.y
@@ -2767,7 +2781,110 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
      * （平台只算没被上层盖住的部分），而窗口摘掉后平台不会自己再算一次。
      * 节流交给调用方（PadService）。
      */
-    void reassertGestureExclusion(String reason) {
+    int screenWidth() {
+        return screenWidth;
+    }
+
+    /**
+     * 无障碍服务观测到输入法窗口变化（主线程）：topPx &lt;= 0 表示键盘收起。
+     *
+     * <p>规则（用户 2026-11-19 定）：键盘弹出且竖条会压到键盘 → 抬到键盘上方；
+     * **键盘会话期间怎么拖都不落盘**，收起时回到进键盘前的位置。
+     */
+    void refreshKeyboardLift(int topPx) {
+        boolean up = topPx > 0 && prefs.getKeyboardLift();
+        if (up == imeVisible && (!up || Math.abs(topPx - imeTopPx) < 1)) {
+            return;
+        }
+        if (up) {
+            if (!imeVisible) {
+                imeSavedY = settledY;
+            }
+            imeVisible = true;
+            imeTopPx = topPx;
+            liftForKeyboard();
+        } else {
+            imeVisible = false;
+            imeTopPx = -1;
+            restoreAfterKeyboard();
+        }
+    }
+
+    /** 需要的话把显示位置抬到键盘上方；本来就在上面就不动。 */
+    private void liftForKeyboard() {
+        if (!started || panelParams == null) {
+            return;
+        }
+        int gap = dp(KEYBOARD_LIFT_GAP_DP);
+        if (settledY + handleHeight <= imeTopPx - gap) {
+            return; // 竖条本来就在键盘上方，不折腾
+        }
+        if (state != State.SETTLED && state != State.ADJUST) {
+            return; // 面板在外面：只记了 imeSavedY，等下一次键盘事件再说
+        }
+        int targetY = Math.max(gap, imeTopPx - handleHeight - gap);
+        log.info("KEYBOARD", "lift from=" + settledY + " to=" + targetY
+                + " imeTop=" + imeTopPx);
+        settledY = targetY;
+        animateHandleTo(targetY, "lift");
+    }
+
+    /** 键盘收起：回到进键盘前的位置（会话期间的拖动一律丢弃）。 */
+    private void restoreAfterKeyboard() {
+        int restoreY = imeSavedY;
+        imeSavedY = -1;
+        if (restoreY < 0 || panelParams == null) {
+            return;
+        }
+        log.info("KEYBOARD", "restore to=" + restoreY);
+        settledY = restoreY;
+        if (state == State.SETTLED || state == State.ADJUST) {
+            animateHandleTo(restoreY, "restore");
+        }
+    }
+
+    private void animateHandleTo(int targetY, String reason) {
+        if (panelParams == null) {
+            return;
+        }
+        cancelImeAnimator();
+        int fromY = panelParams.y;
+        if (fromY == targetY) {
+            syncHandleLayerLayout();
+            updatePanelLayoutImmediate();
+            return;
+        }
+        android.animation.ValueAnimator animator =
+                android.animation.ValueAnimator.ofInt(fromY, targetY);
+        animator.setDuration(KEYBOARD_LIFT_ANIM_MS);
+        animator.setInterpolator(new android.view.animation.DecelerateInterpolator());
+        animator.addUpdateListener(animation -> {
+            if (panelParams == null) {
+                return;
+            }
+            panelParams.y = (int) animation.getAnimatedValue();
+            syncHandleLayerLayout();
+            updatePanelLayoutImmediate();
+        });
+        animator.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator animation) {
+                imeAnimator = null;
+            }
+        });
+        imeAnimator = animator;
+        animator.start();
+        log.info("KEYBOARD", "animate reason=" + reason + " from=" + fromY + " to=" + targetY);
+    }
+
+    private void cancelImeAnimator() {
+        if (imeAnimator != null) {
+            imeAnimator.cancel();
+            imeAnimator = null;
+        }
+    }
+
+    void reassertGestureExclusion(String reason) {    /** IME-PROBE：键盘高度能不能从 insets 里拿到。 */
         forceResendGestureExclusion("reassert:" + reason);
     }
 

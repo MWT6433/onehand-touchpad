@@ -69,6 +69,7 @@ final class Prefs {
     private static final String KEY_SIDE = "side";
     private static final String KEY_Y_PERCENT = "y_percent";
     private static final String KEY_ONBOARDED = "onboarded";
+    private static final String KEY_KEYBOARD_LIFT = "keyboard_lift";
     private static final String KEY_GUIDE_FORCED = "guide_forced";
 
     private final SharedPreferences preferences;
@@ -188,6 +189,14 @@ final class Prefs {
 
     boolean getDoubleTapSwitcher() {
         return preferences.getBoolean(DOUBLE_TAP_SWITCHER, DOUBLE_TAP_SWITCHER_DEFAULT);
+    }
+
+    boolean getKeyboardLift() {
+        return preferences.getBoolean(KEY_KEYBOARD_LIFT, true);
+    }
+
+    void setKeyboardLift(boolean enabled) {
+        preferences.edit().putBoolean(KEY_KEYBOARD_LIFT, enabled).apply();
     }
 
     void setDoubleTapSwitcher(boolean enabled) {
