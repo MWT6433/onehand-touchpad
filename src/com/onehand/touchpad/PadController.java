@@ -332,7 +332,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         sideBarHeight = Math.max(1, Math.round(dp(Prefs.SIDE_BAR_H_DP) * k));
         sideBarTopOffset = panelHeight + gap + arrowBarHeight + gap;
         windowWidth = panelWidth;
-        windowHeight = panelHeight + gap + arrowBarHeight;
+        windowHeight = PadGeometry.windowHeight(panelHeight, gap, arrowBarHeight);
         if (panelHeight != requestedPanelHeight) {
             Log.i(TAG, "SCALE_CLAMP scale=" + twoDecimals(k)
                     + " requestedPanelH=" + requestedPanelHeight
