@@ -189,7 +189,7 @@
 | 光标按位移、速度和灵敏度移动 | `src/com/onehand/touchpad/PadController.java:1500` |
 | 短按原地抬起执行点击 | `src/com/onehand/touchpad/PadController.java:875`、`src/com/onehand/touchpad/PadController.java:1543` |
 | 600ms 长按 | `src/com/onehand/touchpad/PadController.java:42`、`src/com/onehand/touchpad/PadController.java:1575` |
-| 可选长按拖动，默认关闭 | `src/com/onehand/touchpad/Prefs.java:157`、`src/com/onehand/touchpad/PadController.java:1616` |
+| 长按拖动，默认开启（可在调试抽屉里关） | `src/com/onehand/touchpad/Prefs.java:157`、`src/com/onehand/touchpad/PadController.java:1616` |
 | 底部四格依次为左、右、下、上 | `src/com/onehand/touchpad/PanelView.java:33`、`src/com/onehand/touchpad/PanelView.java:171` |
 | 四方向从光标滑动约屏幕尺寸 35% | `src/com/onehand/touchpad/Prefs.java:42`、`src/com/onehand/touchpad/PadController.java:1764` |
 | 单击模式拖出光标、松手点击 | `src/com/onehand/touchpad/PadController.java:826`、`src/com/onehand/touchpad/PadController.java:875` |

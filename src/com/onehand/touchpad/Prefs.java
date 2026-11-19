@@ -162,9 +162,10 @@ final class Prefs {
     }
 
     boolean getLongPressDrag() {
-        // 长按拖动在纯无障碍路线不可靠：dispatch 一开始，本窗口触摸即被 ACTION_CANCEL。
-        // 保留实现供实验，默认关闭。
-        return preferences.getBoolean(LONG_PRESS_DRAG, false);
+        // 长按拖动：按住手柄后继续拖动，实现上是在一次 dispatch 里用 willContinue 串多段 stroke。
+        // P2 真机验证这条链系统是接受的（连续三步无 cancel），因此默认开启；
+        // 万一某个机型不认，调试抽屉里关掉即可。
+        return preferences.getBoolean(LONG_PRESS_DRAG, true);
     }
 
     void setLongPressDrag(boolean enabled) {
