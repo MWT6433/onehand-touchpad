@@ -1,6 +1,6 @@
 # 架构说明
 
-本文从源码出发说明主要模块、覆盖窗口、状态切换、注入链路和坐标系。行号对应当前仓库版本，便于人工复核。
+本文从源码出发说明主要模块、覆盖窗口、状态切换、注入链路和坐标系。附录使用类、字段或方法符号定位源码，便于跨版本复核。
 
 ## 模块地图
 
@@ -11,7 +11,7 @@
 | `GestureInjector.java` | 无障碍手势注入器，构建路径、派发手势并串行处理请求。 | `dispatchGesture`、`TAP_DURATION_MS`、`INJECTION_WINDOW_MS` |
 | `Haptics.java` | 根据点击、长按、方向、调位等来源触发短震动。 | `tick`、`REASON_*`、`durationFor` |
 | `Injector.java` | 注入器接口和空实现；控制器只依赖该接口。 | `tap`、`swipe`、`longPress`、`NoopInjector` |
-| `PadController.java` | 核心状态机，管理四个窗口、触摸语义、光标、快捷菜单和收回动画。 | `State`、`PULL_TRIGGER_MM`、`LONG_PRESS_MS`、`ECHO_RADIUS_DP` |
+| `PadController.java` | 核心状态机，包含六个覆盖窗口添加点，管理触摸语义、光标、快捷菜单、任务切换器和收回动画。 | `State`、`PULL_TRIGGER_MM`、`LONG_PRESS_MS`、`ECHO_RADIUS_DP` |
 | `PadEnabler.java` | 通过 Shizuku 安全设置服务开启或关闭本应用无障碍组件。 | `ENABLED_SERVICES`、`buildNewValue`、`setEnabled` |
 | `PadService.java` | 无障碍服务生命周期入口，选择无障碍或 Shizuku 注入并创建控制器。 | `onServiceConnected`、`reconnectController`、`replaceInjector` |
 | `PadTileService.java` | 提供“触控板”快捷设置磁贴。 | `onClick`、`updateTile` |
@@ -24,14 +24,15 @@
 | `SettingsActivity.java` | 单屏仪表、首次引导、手柄位置、开关、调试抽屉和授权入口。 | `buildConsole`、`buildOnboardingGuide`、`buildDebugDrawerOverlay` |
 | `ShizukuClient.java` | 检查 Shizuku 安装、Binder 状态和权限。 | `isInstalled`、`isBinderAlive`、`isPermissionGranted` |
 | `ShizukuInjectionService.java` | 运行在 Shizuku 用户服务进程，把 `MotionEvent` 送入系统输入通道。 | `send`、`probeBackend`、`injectInputEvent` |
-| `ShizukuInjector.java` | 绑定 Shizuku 输入服务、处理权限/Binder 变化，并在失败时回退无障碍路径。 | `fallbackReason`、`sendInput`、`INJECT_FALLBACK` |
+| `ShizukuInjector.java` | 绑定 Shizuku 输入服务；本地连接/Binder 或权限判据命中时回退无障碍路径。 | `fallbackReason`、`sendInput`、`INJECT_FALLBACK` |
 | `ShizukuSettingsService.java` | Shizuku 用户服务中的 `settings put secure` 桥接层。 | `putSecure`、`ISettingsApi` |
 | `ShortcutPublisher.java` | 发布桌面动态快捷方式：`toggle_pad`（开关）、`switch_side`（切换左右手）。 | `ID_TOGGLE_PAD`、`ID_SWITCH_SIDE`、`ensure` |
 | `SideToggleBar.java` | 独立的上下双箭头长条，点击后切换光标方位。 | `onTouchEvent`、`performClick` |
+| `TaskSwitcherView.java` | 绘制最近任务抽屉并处理应用/任务选择。 | `TaskSwitcherView`、`setMorph`、`setInteractive` |
 
 ## 窗口体系
 
-四个可见部件优先使用 `TYPE_ACCESSIBILITY_OVERLAY`。`addOverlayWindow` 在无障碍覆盖窗口被拒绝时，会尝试 `TYPE_APPLICATION_OVERLAY`。
+`PadController` 有六个 `addOverlayWindow` 添加点：面板、手柄触摸层、任务切换器、侧栏、光标和快捷菜单。基础停靠状态下，正常模式创建面板与独立手柄触摸层两个窗口，单击模式只创建面板窗口；进入活动状态再创建光标和侧栏，其它窗口按交互需要添加。窗口优先使用 `TYPE_ACCESSIBILITY_OVERLAY`；被拒绝时 `addOverlayWindow` 会尝试 `TYPE_APPLICATION_OVERLAY`。
 
 “窗口宽度恒定、只移动 x”是侧边停靠和收回设计的基本原则：切换左右手时只改横向位置，不使用窗口宽度动画；正常拖出、纵向跟手和长按调位会更新位置，但同样不修改窗口宽高。
 
@@ -49,7 +50,7 @@
 
 窗口使用 `TOP | START`，坐标以屏幕左上角为原点。右侧停靠时，`x = screenWidth - handleWidth - 8dp`；左侧停靠时，完整窗口的大部分可在屏幕外，只露出内侧手柄。
 
-单击模式只创建 `handleWidth × handleHeight` 的手柄窗口，不显示完整面板。
+单击模式不显示完整面板，但窗口宽度不是手柄可见宽度：`createClickModeHandleParams()` 将边缘内缩量、手柄宽度和触摸识别余量合入窗口宽度，高度仍取手柄高度。这样窗口既承载手柄，也承载手势排除区域。
 
 ### 光标窗口：`CursorView`
 
@@ -81,7 +82,7 @@
 | --- | --- |
 | `SETTLED → PULLING` | 手柄触摸先超过系统 `touchSlop`，累计位移再达到 `PULL_TRIGGER_MM = 6.0` 换算出的 `pullTriggerPx`。 |
 | `SETTLED → ADJUST` | 按住手柄 `LONG_PRESS_MS = 600`，期间未发生位移；随后只允许上下调整手柄位置。 |
-| `ADJUST → SETTLED` | 抬手时保存纵向百分比；取消时恢复进入调位前的停靠位置。 |
+| `ADJUST → SETTLED` | 非 IME 会话抬手时保存纵向百分比；IME 会话中的调整只保留临时位置、不写入偏好，键盘收起时恢复原位置。 |
 | `PULLING → ACTIVE` | 全功能模式下抬手，提交最终面板位置、显示光标并创建光标方位长条。 |
 | `PULLING → RETRACTING` | 拖出期间取消，或面板外触摸导致收回。 |
 | `PULLING → SETTLED` | 单击模式抬手并在光标处点击；或快捷菜单选中任一项并完成动作。 |
@@ -94,8 +95,9 @@
 ## 屏蔽边缘手势（SystemGestureExclusion）
 
 把手柄所在的矩形报给系统（`View.setSystemGestureExclusionRects`，API 29+），
-从这块区域起手的侧边返回手势就交给触控板自己。唯一写入点是
-`PadController.applyHandleGestureExclusion()`（按窗口尺寸去重，拖动期间不每帧重写）。
+从这块区域起手的侧边返回手势就交给触控板自己。写入有三类路径：常规路径由
+`applyHandleGestureExclusion()` 按窗口尺寸去重；探针 `toggleProbeExclusion()` 会先直接写诊断矩形、再恢复常驻矩形；
+`forceResendGestureExclusion()` 会直接清空，再异步调用常规路径重报，并按需延迟重试。
 
 ### 平台怎么算这块区域
 
@@ -143,9 +145,10 @@
 
 `ShizukuInjector` 绑定独立的用户服务进程，把 `ACTION_DOWN/MOVE/UP/CANCEL` 发给 `ShizukuInjectionService`。
 
-远端服务优先通过反射调用系统 `InputManager.injectInputEvent`，无法使用时再尝试 Binder 输入服务。
+远端服务依次尝试反射调用系统 `InputManager.injectInputEvent`、
+`InputManagerGlobal.injectInputEvent`，最后尝试 Binder 输入服务。
 
-连接断开、权限失效或服务不可用时，`ShizukuInjector` 会回退到内部的无障碍 `GestureInjector`。因此 Shizuku 是增强路径，不是运行前提。
+`ShizukuInjector.fallbackReason()` 只在本地用户服务未连接/Binder 不可用或权限失效时选择内部无障碍 `GestureInjector`。若本地连接和权限仍可用、但远端服务没有可用输入 backend，远端 `send()` 返回失败；当前请求不会因此回退到无障碍路径。因此 Shizuku 是可选通道，但远端 backend 故障不保证当前请求自动切换。
 
 ### 回声抑制
 
@@ -171,7 +174,7 @@
 
 ## 权限与隐私
 
-无障碍配置只声明 `canPerformGestures=true`。`onAccessibilityEvent` 没有行为，也没有调用 `getRootInActiveWindow`、`getWindows` 或节点查询。
+无障碍配置声明 `canPerformGestures=true`，也声明 `canRetrieveWindowContent=true`、交互窗口标志及窗口状态/窗口集合事件。`PadService.onAccessibilityEvent()` 处理这些窗口事件；`readImeTopPx()` 调用 `getWindows()`，读取输入法窗口的类型和屏幕边界以计算键盘位置。本次源码核对未发现读取无障碍节点文本的调用；窗口枚举能力与节点文本读取是不同范围。
 
 清单权限只有悬浮窗回退、震动和 Shizuku API，没有网络、账户或分析权限。
 
@@ -179,25 +182,25 @@
 
 ## 附录：功能点到代码位置
 
-| 功能点 | 文件:行号 |
+| 功能点 | 文件:符号 |
 | --- | --- |
-| 左右侧手柄与位置保存 | `src/com/onehand/touchpad/Prefs.java:9`、`src/com/onehand/touchpad/SettingsActivity.java:649` |
-| 手柄厚度 11–28dp、长度 48–160dp | `src/com/onehand/touchpad/Prefs.java:23`、`src/com/onehand/touchpad/Prefs.java:25` |
-| 面板按屏幕比例计算并在基准设备约为 432×617px | `src/com/onehand/touchpad/PadController.java:252`、`src/com/onehand/touchpad/PadController.java:264` |
-| 组件缩放 0.1×–2.0× | `src/com/onehand/touchpad/Prefs.java:19`、`src/com/onehand/touchpad/SettingsActivity.java:399` |
-| 6mm 拖出阈值 | `src/com/onehand/touchpad/PadController.java:44`、`src/com/onehand/touchpad/PadController.java:243` |
-| 光标按位移、速度和灵敏度移动 | `src/com/onehand/touchpad/PadController.java:1500` |
-| 短按原地抬起执行点击 | `src/com/onehand/touchpad/PadController.java:875`、`src/com/onehand/touchpad/PadController.java:1543` |
-| 600ms 长按 | `src/com/onehand/touchpad/PadController.java:42`、`src/com/onehand/touchpad/PadController.java:1575` |
-| 长按拖动，默认开启（可在调试抽屉里关） | `src/com/onehand/touchpad/Prefs.java:157`、`src/com/onehand/touchpad/PadController.java:1616` |
-| 底部四格依次为左、右、下、上 | `src/com/onehand/touchpad/PanelView.java:33`、`src/com/onehand/touchpad/PanelView.java:171` |
-| 四方向从光标滑动约屏幕尺寸 35% | `src/com/onehand/touchpad/Prefs.java:42`、`src/com/onehand/touchpad/PadController.java:1764` |
-| 单击模式拖出光标、松手点击 | `src/com/onehand/touchpad/PadController.java:826`、`src/com/onehand/touchpad/PadController.java:875` |
-| 拖到对侧弹出三项快捷菜单 | `src/com/onehand/touchpad/PadController.java:1120`、`src/com/onehand/touchpad/QuickMenuView.java:233` |
-| 快捷菜单换侧、切模式、停止 | `src/com/onehand/touchpad/PadController.java:1261` |
-| 独立长条切换上方/内侧光标 | `src/com/onehand/touchpad/SideToggleBar.java:60`、`src/com/onehand/touchpad/PadController.java:978` |
-| 单屏仪表、调试抽屉和三态引导 | `src/com/onehand/touchpad/SettingsActivity.java:250`、`src/com/onehand/touchpad/SettingsActivity.java:985`、`src/com/onehand/touchpad/SettingsActivity.java:1562` |
-| 无障碍覆盖窗口、手势能力与 `dispatchGesture` 注入 | `src/com/onehand/touchpad/PadController.java:38`、`res/xml/pad_service.xml:4`、`src/com/onehand/touchpad/GestureInjector.java:309` |
-| Shizuku 可选通道及失效回退 | `src/com/onehand/touchpad/PadService.java:47`、`src/com/onehand/touchpad/ShizukuInjector.java:588` |
-| 不读取屏幕内容 | `src/com/onehand/touchpad/PadService.java:69` |
-| 无网络、账户与分析权限 | `AndroidManifest.xml:5` |
+| 左右侧手柄与位置保存 | `src/com/onehand/touchpad/Prefs.java#getSide/setSide/getYPercent/setYPercent`、`src/com/onehand/touchpad/PadController.java#onPanelUp/switchSideNow`、`src/com/onehand/touchpad/SettingsActivity.java#setSideAndReload` |
+| 手柄厚度 11–28dp、长度 48–160dp | `src/com/onehand/touchpad/Prefs.java#HANDLE_W_MIN/HANDLE_W_MAX/HANDLE_H_MIN/HANDLE_H_MAX` |
+| 面板按屏幕比例计算并在基准设备约为 432×617px | `src/com/onehand/touchpad/PadController.java#PadController`、`src/com/onehand/touchpad/Prefs.java#PANEL_W_RATIO/PANEL_H_RATIO`、`src/com/onehand/touchpad/PadGeometry.java#windowHeight` |
+| 组件缩放 0.1×–2.0× | `src/com/onehand/touchpad/Prefs.java#PANEL_SCALE_MIN/PANEL_SCALE_MAX`、`src/com/onehand/touchpad/SettingsActivity.java#addGaugeGrid` |
+| 6mm 拖出阈值 | `src/com/onehand/touchpad/PadController.java#PULL_TRIGGER_MM/onPanelMove` |
+| 光标按位移、速度和灵敏度移动 | `src/com/onehand/touchpad/PadController.java#moveCursor`、`src/com/onehand/touchpad/Prefs.java#getSensitivity` |
+| 短按原地抬起执行点击 | `src/com/onehand/touchpad/PadController.java#onPanelUp/handleShortPress` |
+| 600ms 长按 | `src/com/onehand/touchpad/PadController.java#LONG_PRESS_MS/onPanelDown/triggerGestureLongPress` |
+| 长按拖动：getter 缺键默认开启；全新安装且尚未授权 Shizuku 时可被一次性默认初始化关闭 | `src/com/onehand/touchpad/Prefs.java#getLongPressDrag/applyShizukuGatedDefaults`、`src/com/onehand/touchpad/PadController.java#onPanelDown` |
+| 底部四格依次为左、右、下、上 | `src/com/onehand/touchpad/PanelView.java#ARROW_DIRECTIONS/onDraw` |
+| 四方向滑动距离约为屏幕尺寸 35% | `src/com/onehand/touchpad/Prefs.java#ARROW_SWIPE_RATIO`、`src/com/onehand/touchpad/PadController.java#handleArrow` |
+| 单击模式拖出光标、松手点击 | `src/com/onehand/touchpad/PadController.java#beginPulling/onPanelUp` |
+| 拖到对侧弹出三项快捷菜单 | `src/com/onehand/touchpad/PadController.java#showQuickMenu`、`src/com/onehand/touchpad/QuickMenuView.java#QuickMenuView` |
+| 快捷菜单换侧、切模式、停止 | `src/com/onehand/touchpad/PadController.java#finishQuickMenuOnUp` |
+| 独立长条切换上方/内侧光标 | `src/com/onehand/touchpad/SideToggleBar.java#onTouchEvent`、`src/com/onehand/touchpad/PadController.java#onCursorSideToggle` |
+| 单屏仪表、调试抽屉和三态引导 | `src/com/onehand/touchpad/SettingsActivity.java#buildConsole/buildOnboardingGuide/buildDebugDrawerOverlay` |
+| 无障碍覆盖窗口、手势能力与手势派发 | `src/com/onehand/touchpad/PadController.java#addOverlayWindow`、`res/xml/pad_service.xml#canPerformGestures`、`src/com/onehand/touchpad/GestureInjector.java#dispatchNow/dispatchDragStroke` |
+| Shizuku 通道选择及失效回退判据 | `src/com/onehand/touchpad/PadService.java#reconnectController`、`src/com/onehand/touchpad/ShizukuInjector.java#fallbackReason` |
+| 窗口事件与输入法窗口元数据；本轮源码未发现节点文本读取 | `src/com/onehand/touchpad/PadService.java#onAccessibilityEvent/readImeTopPx`、`res/xml/pad_service.xml#canRetrieveWindowContent` |
+| Manifest 声明的权限项 | `AndroidManifest.xml#uses-permission` |
