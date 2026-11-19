@@ -99,6 +99,8 @@ public final class SettingsActivity extends Activity {
     private Switch shizukuInjectCheckBox;
     private Button sideButton;
     private TextView shizukuStatusText;
+    /** Shizuku 未授权时，双击打开任务面板下面那行红字（说清两点能力差异）。 */
+    private TextView shizukuTaskHint;
     private LinearLayout dashboardContainer;
     private LinearLayout switchRowsContainer;
     private LinearLayout guideContainer;
@@ -293,6 +295,7 @@ public final class SettingsActivity extends Activity {
         content.addView(dashboardContainer);
         addGaugeGrid(dashboardContainer);
         buildHandlePositionRow(content);
+        buildShizukuRow(content);
 
         switchRowsContainer = new LinearLayout(this);
         switchRowsContainer.setOrientation(LinearLayout.VERTICAL);
@@ -713,6 +716,61 @@ public final class SettingsActivity extends Activity {
         rowParams = matchHeight(dp(60));
         rowParams.topMargin = dp(10);
         content.addView(interactionCard, rowParams);
+
+        // 没有 Shizuku 时，这个开关做的事会明显缩水：列表只有应用级、没有 ×。
+        // 提示直接跟在开关下面（用户实测最容易被这两点坑到）。
+        shizukuTaskHint = createText(
+                "没有 Shizuku：任务列表只到应用级，也没有 × 关闭按钮",
+                12f, COLOR_DANGER, false);
+        shizukuTaskHint.setVisibility(View.GONE);
+        LinearLayout.LayoutParams taskHintParams = matchWrap();
+        taskHintParams.leftMargin = dp(8);
+        taskHintParams.rightMargin = dp(8);
+        taskHintParams.topMargin = dp(4);
+        taskHintParams.bottomMargin = dp(6);
+        content.addView(shizukuTaskHint, taskHintParams);
+    }
+
+    /**
+     * Shizuku 那一行：从调试抽屉搬到主页、紧跟「手柄位置」。
+     *
+     * <p>它不是调试项——任务切换器的「切回原任务 / 关闭任务 / 精确高亮」全靠它，
+     * 藏在调试抽屉里会让人以为这软件完全不用 Shizuku。
+     */
+    private void buildShizukuRow(LinearLayout content) {
+        LinearLayout row = createSwitchRowLayout();
+        LinearLayout labels = createSwitchLabelGroup(
+                "Shizuku", shizukuStatusLabel(resolveShizukuState()));
+        shizukuStatusText = (TextView) labels.getChildAt(1);
+        shizukuStatusText.setMinHeight(dp(20));
+        shizukuStatusText.setGravity(Gravity.CENTER_VERTICAL);
+        shizukuStatusText.setPadding(dp(4), 0, dp(4), 0);
+        shizukuStatusText.setBackground(interactiveTextBackground());
+        shizukuStatusText.setOnClickListener(view -> requestShizukuPermissionIfNeeded());
+        row.addView(labels, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        shizukuInjectCheckBox = new Switch(this);
+        tintSwitch(shizukuInjectCheckBox);
+        shizukuInjectCheckBox.setId(View.generateViewId());
+        shizukuInjectCheckBox.setShowText(false);
+        shizukuInjectCheckBox.setMinHeight(dp(48));
+        shizukuInjectCheckBox.setContentDescription("Shizuku 注入");
+        shizukuInjectCheckBox.setChecked(Prefs.INJECT_CHANNEL_SHIZUKU.equals(
+                settingsPrefs.getInjectChannel()));
+        shizukuInjectCheckBox.setOnCheckedChangeListener((button, checked) -> {
+            if (uiSyncInProgress) return;
+            handleShizukuToggle(checked);
+        });
+        LinearLayout.LayoutParams switchParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
+        switchParams.gravity = Gravity.CENTER_VERTICAL;
+        row.addView(shizukuInjectCheckBox, switchParams);
+        ((TextView) labels.getChildAt(0)).setLabelFor(shizukuInjectCheckBox.getId());
+
+        LinearLayout.LayoutParams rowParams = matchHeight(dp(60));
+        rowParams.topMargin = dp(10);
+        content.addView(row, rowParams);
     }
 
     private void buildHandlePositionRow(LinearLayout content) {
@@ -1106,8 +1164,8 @@ public final class SettingsActivity extends Activity {
         targetCountText = null;
         logScrollView = null;
         sideButton = null;
-        shizukuStatusText = null;
-        shizukuInjectCheckBox = null;
+        // 注意：Shizuku 行现在在主页，不随抽屉重建——这里不能把它的引用置空，
+        // 否则 refreshShizukuControls() 之后再也更新不到那一行（P80 真机踩过）。
 
         TextView handle = new TextView(this);
         handle.setBackground(roundedBackground(COLOR_MUTED, 2f));
@@ -1165,41 +1223,6 @@ public final class SettingsActivity extends Activity {
         debugModeRow.addView(debugModeSwitch, debugModeParams);
         debugModeLabel.setLabelFor(debugModeSwitch.getId());
         debugDrawerContent.addView(debugModeRow, matchHeight(dp(48)));
-
-        LinearLayout shizukuDivider = new LinearLayout(this);
-        shizukuDivider.setBackgroundColor(COLOR_DIVIDER);
-        debugDrawerContent.addView(shizukuDivider, matchHeight(dp(1)));
-
-        LinearLayout shizukuRow = createSwitchRowLayout();
-        LinearLayout shizukuLabels = createSwitchLabelGroup(
-                "Shizuku 注入", shizukuStatusLabel(resolveShizukuState()));
-        shizukuStatusText = (TextView) shizukuLabels.getChildAt(1);
-        shizukuStatusText.setMinHeight(dp(20));
-        shizukuStatusText.setGravity(Gravity.CENTER_VERTICAL);
-        shizukuStatusText.setPadding(dp(4), 0, dp(4), 0);
-        shizukuStatusText.setBackground(interactiveTextBackground());
-        shizukuStatusText.setOnClickListener(view -> requestShizukuPermissionIfNeeded());
-        shizukuRow.addView(shizukuLabels, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        shizukuInjectCheckBox = new Switch(this);
-        tintSwitch(shizukuInjectCheckBox);
-        shizukuInjectCheckBox.setId(View.generateViewId());
-        shizukuInjectCheckBox.setShowText(false);
-        shizukuInjectCheckBox.setMinHeight(dp(48));
-        shizukuInjectCheckBox.setContentDescription("Shizuku 注入（实验）");
-        shizukuInjectCheckBox.setChecked(Prefs.INJECT_CHANNEL_SHIZUKU.equals(
-                settingsPrefs.getInjectChannel()));
-        shizukuInjectCheckBox.setOnCheckedChangeListener((button, checked) -> {
-            if (uiSyncInProgress) return;
-            handleShizukuToggle(checked);
-        });
-        LinearLayout.LayoutParams shizukuSwitchParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
-        shizukuSwitchParams.gravity = Gravity.CENTER_VERTICAL;
-        shizukuRow.addView(shizukuInjectCheckBox, shizukuSwitchParams);
-        ((TextView) shizukuLabels.getChildAt(0)).setLabelFor(shizukuInjectCheckBox.getId());
-        debugDrawerContent.addView(shizukuRow, matchHeight(dp(60)));
 
         Button resetGuideButton = createDrawerButton("重新显示引导");
         resetGuideButton.setOnClickListener(view -> {
@@ -1505,7 +1528,13 @@ public final class SettingsActivity extends Activity {
             return "已连接";
         }
         if ("未安装".equals(state)) {
-            return "未安装";
+            return "未安装（点此查看）";
+        }
+        if ("未授权（点此授权）".equals(state)) {
+            return "未授权（点此授权）";
+        }
+        if ("未运行".equals(state)) {
+            return "未运行（点此授权）";
         }
         return "未连接";
     }
@@ -1523,6 +1552,10 @@ public final class SettingsActivity extends Activity {
         if (shizukuInjectCheckBox != null) {
             setShizukuSwitchChecked(Prefs.INJECT_CHANNEL_SHIZUKU.equals(
                     settingsPrefs.getInjectChannel()));
+        }
+        if (shizukuTaskHint != null) {
+            boolean ready = "已连接".equals(state);
+            shizukuTaskHint.setVisibility(ready ? View.GONE : View.VISIBLE);
         }
     }
 
