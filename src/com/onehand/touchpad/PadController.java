@@ -116,7 +116,15 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private int settledX;
     private int settledY;
     /** 键盘会话：键盘停靠时把显示位置抬到键盘上方，收起时回到进键盘前的位置。 */
-    private static final int KEYBOARD_LIFT_ANIM_MS = 180;
+    private static final int KEYBOARD_LIFT_ANIM_MS = 240;
+    /**
+     * 键盘避让的缓动：都不是直线，两头收、中间快。
+     * 抬升（被键盘顶上去）稍跟手一点；回落（键盘收起后掉回去）起步更缓，像有重量。
+     */
+    private static final TimeInterpolator KEYBOARD_LIFT_EASE =
+            new PathInterpolator(0.25f, 0f, 0.15f, 1f);
+    private static final TimeInterpolator KEYBOARD_RESTORE_EASE =
+            new PathInterpolator(0.35f, 0f, 0.18f, 1f);
     private static final int KEYBOARD_LIFT_GAP_DP = 8;
     private boolean imeVisible;
     private int imeTopPx = -1;
@@ -2856,8 +2864,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         android.animation.ValueAnimator animator =
                 android.animation.ValueAnimator.ofInt(fromY, targetY);
+        boolean lifting = targetY < fromY;
         animator.setDuration(KEYBOARD_LIFT_ANIM_MS);
-        animator.setInterpolator(new android.view.animation.DecelerateInterpolator());
+        animator.setInterpolator(lifting ? KEYBOARD_LIFT_EASE : KEYBOARD_RESTORE_EASE);
         animator.addUpdateListener(animation -> {
             if (panelParams == null) {
                 return;
@@ -2874,7 +2883,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         });
         imeAnimator = animator;
         animator.start();
-        log.info("KEYBOARD", "animate reason=" + reason + " from=" + fromY + " to=" + targetY);
+        log.info("KEYBOARD", "animate reason=" + reason + " from=" + fromY + " to=" + targetY
+                + " ease=" + (lifting ? "lift" : "restore"));
     }
 
     private void cancelImeAnimator() {
