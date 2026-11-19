@@ -31,6 +31,13 @@ public final class PadService extends AccessibilityService {
                     "com.android.systemui")));
     /** 窗口事件驱动的排除区补报节流：系统界面切换很密，别每个事件都重报三次。 */
     private static final long EXCLUSION_REASSERT_INTERVAL_MS = 600L;
+    /**
+     * 键盘一出现就跟手：领先读之间的最小间隔（只用来合并窗口事件的突发）。
+     * 原来是固定等 150ms 再读，竖条会明显慢半拍。
+     */
+    private static final long IME_LEAD_MIN_INTERVAL_MS = 70L;
+    /** 尾随读：等输入法自己的弹出动画停下来，把竖条对齐到最终位置。 */
+    private static final long IME_SETTLE_DELAY_MS = 120L;
 
     private static volatile PadService instance;
     private long lastExclusionReassertMs;
@@ -136,16 +143,37 @@ public final class PadService extends AccessibilityService {
 
     private int lastImeTop;
     private boolean imeCheckPending;
+    private long lastImeReadMs;
+    /**
+     * 上一次键盘停稳时的真实高度（尾随读校准）。
+     *
+     * <p>实测：三星输入法滑上来的过程中，无障碍拿到的 IME 窗口 bounds 还是一个 46px 高的
+     * 小窗（top≈3042），要等动画快结束才一次跳到 1821——只靠事件驱动，竖条必然慢 380ms 左右。
+     * 所以第一次看到 IME 窗口就按上次高度估出最终顶边，先把竖条顶上去；尾随读再用真值校准。
+     */
+    private int imeHeightPx;
+    /**
+     * 本次弹出过程中见过的最大键盘高度。中途读到的都是动画中的半截窗口，
+     * 只有"最大"是单调可信的——中途的小窗永远不会把它改小。
+     */
+    private int imeSessionMaxHeight;
 
     private void scheduleImeCheck() {
-        if (imeCheckPending) {
-            return;
+        long now = android.os.SystemClock.uptimeMillis();
+        // 领先读：立刻按当前状态算一次（读不到键盘不算数，见 refreshImeState(boolean)）。
+        if (now - lastImeReadMs >= IME_LEAD_MIN_INTERVAL_MS) {
+            lastImeReadMs = now;
+            refreshImeState(false);
         }
-        imeCheckPending = true;
-        mainHandler.postDelayed(() -> {
-            imeCheckPending = false;
-            refreshImeState();
-        }, 150L);
+        // 尾随读：输入法动画停下来之后再对一次最终位置，也负责"键盘收起"的回落。
+        if (!imeCheckPending) {
+            imeCheckPending = true;
+            mainHandler.postDelayed(() -> {
+                imeCheckPending = false;
+                lastImeReadMs = android.os.SystemClock.uptimeMillis();
+                refreshImeState(true);
+            }, IME_SETTLE_DELAY_MS);
+        }
     }
 
     /**
@@ -181,6 +209,14 @@ public final class PadService extends AccessibilityService {
 
     /** 立即按当前键盘状态重算（开关拨动、重建控制器后调）。 */
     static void refreshImeState() {
+        refreshImeState(true);
+    }
+
+    /**
+     * @param allowHide false = 只认"看到键盘"：读不到就保持现状。输入法刚弹出那一下
+     *                  getWindows() 可能还没有 IME 窗口，据此回落会让竖条先掉下去再弹上来。
+     */
+    static void refreshImeState(boolean allowHide) {
         PadService service = instance;
         if (service == null) {
             return;
@@ -189,7 +225,31 @@ public final class PadService extends AccessibilityService {
         if (current == null) {
             return;
         }
-        int top = readImeTopPx(service, current.screenWidth());
+        int observed = readImeTopPx(service, current.screenWidth());
+        if (observed < 0 && !allowHide) {
+            return;
+        }
+        int screenHeight = current.screenHeight();
+        if (observed > 0) {
+            service.imeSessionMaxHeight = Math.max(service.imeSessionMaxHeight,
+                    screenHeight - observed);
+        } else {
+            // 键盘收起：本次弹出见过的高度里最大的那个才可信（动画中途的读数不是）。
+            if (service.imeSessionMaxHeight >= screenHeight * 3 / 10) {
+                service.imeHeightPx = service.imeSessionMaxHeight;
+            }
+            service.imeSessionMaxHeight = 0;
+        }
+        int top = observed;
+        if (observed > 0 && !allowHide && service.imeHeightPx > 0) {
+            // 领先读：键盘多半还在升起，拿到的 top 偏低——按上次的真实高度估最终位置。
+            int predicted = screenHeight - service.imeHeightPx;
+            if (predicted > 0 && predicted < observed) {
+                top = predicted;
+            }
+        }
+        ProbeLog.get().info("IME", "read top=" + observed + " use=" + top
+                + " cachedH=" + service.imeHeightPx + " allowHide=" + allowHide);
         if (top == service.lastImeTop) {
             return;
         }
