@@ -97,7 +97,7 @@ final class QuickMenuView extends View {
                 cardHeight / 2f);
         cardClipPath.addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW);
         switchSubtitle = leftHandle ? "手柄换到右侧" : "手柄换到左侧";
-        modeTitle = clickMode ? "切换到全功能模式" : "切换到单手模式";
+        modeTitle = clickMode ? "切换到全功能模式" : "切换到单击模式";
         modeSubtitle = clickMode ? "拉出半透明面板" : "只出光标，松手即点击";
         highlightTop = cardTop;
 

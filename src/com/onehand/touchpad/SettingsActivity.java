@@ -706,6 +706,7 @@ public final class SettingsActivity extends Activity {
             if (uiSyncInProgress) return;
             settingsPrefs.setDoubleTapSwitcher(checked);
             ProbeLog.get().info("PREF", "double_tap_switcher=" + (checked ? "on" : "off"));
+            refreshTaskCapabilityHint();
         });
         LinearLayout.LayoutParams doubleTapSwitcherParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
@@ -1539,6 +1540,25 @@ public final class SettingsActivity extends Activity {
         return "未连接";
     }
 
+    /**
+     * 「没有 Shizuku：任务列表只到应用级，也没有 × 关闭按钮」这行红字的判据。
+     *
+     * <p>跟的是**用户自己的选择**，不是 Shizuku 的实时连接状态：
+     * 只有「Shizuku 开关关着」且「双击打开任务面板开着」时，任务面板才会在不被提醒的情况下缩水。
+     * 开关打开但没连上不用这里再说——Shizuku 那一行的副标题自己会写「未授权 / 未运行」。
+     */
+    private void refreshTaskCapabilityHint() {
+        if (shizukuTaskHint == null) {
+            return;
+        }
+        boolean shizukuSwitchOn = Prefs.INJECT_CHANNEL_SHIZUKU.equals(
+                settingsPrefs.getInjectChannel());
+        boolean switcherOn = doubleTapSwitcherSwitch != null
+                && doubleTapSwitcherSwitch.isChecked();
+        shizukuTaskHint.setVisibility(
+                !shizukuSwitchOn && switcherOn ? View.VISIBLE : View.GONE);
+    }
+
     private void refreshShizukuControls() {
         String state = resolveShizukuState();
         if (shizukuStatusText != null) {
@@ -1553,10 +1573,7 @@ public final class SettingsActivity extends Activity {
             setShizukuSwitchChecked(Prefs.INJECT_CHANNEL_SHIZUKU.equals(
                     settingsPrefs.getInjectChannel()));
         }
-        if (shizukuTaskHint != null) {
-            boolean ready = "已连接".equals(state);
-            shizukuTaskHint.setVisibility(ready ? View.GONE : View.VISIBLE);
-        }
+        refreshTaskCapabilityHint();
     }
 
     private void setShizukuSwitchChecked(boolean checked) {
@@ -1566,6 +1583,7 @@ public final class SettingsActivity extends Activity {
         updatingShizukuSwitch = true;
         shizukuInjectCheckBox.setChecked(checked);
         updatingShizukuSwitch = false;
+        refreshTaskCapabilityHint();
     }
 
     private void handleMainAction() {
