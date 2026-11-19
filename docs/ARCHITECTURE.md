@@ -91,6 +91,40 @@
 
 收回动画只插值窗口坐标和绘制裁切矩形。面板窗口的 `width/height` 在创建后保持恒定。
 
+## 屏蔽边缘手势（SystemGestureExclusion）
+
+把手柄所在的矩形报给系统（`View.setSystemGestureExclusionRects`，API 29+），
+从这块区域起手的侧边返回手势就交给触控板自己。唯一写入点是
+`PadController.applyHandleGestureExclusion()`（按窗口尺寸去重，拖动期间不每帧重写）。
+
+### 平台怎么算这块区域
+
+`DisplayContent.calculateSystemGestureExclusion()` **自顶向下**遍历窗口，
+每扇窗的排除区只保留「它仍然可触摸、且没有被更上层窗口盖住」的那部分
+（`unhandled` 逐层相减），每条边最多 `200dp`。窗口自身不可触摸时它的排除区直接作废。
+
+由此推出一条容易踩的规则：**任何全屏可触摸的浮层都会把它下面所有窗口的排除区清零**。
+「最近使用」抽屉就是这种浮层，所以它一出现，手柄的排除区必然归零；
+而窗口被移除时平台**不会**自己重算，结果会永久停在空——表现为「开过一次抽屉，
+边缘手势屏蔽就再也不生效」。
+
+### 因此必须主动重报
+
+只要出现「窗口尺寸没变、但平台的计算依据变了」的场合，就必须走
+`forceResendGestureExclusion()`：
+
+- 先 `setSystemGestureExclusionRects(emptyList())`，**隔一条消息**再写回真实矩形。
+  `View.setSystemGestureExclusionRects` 在列表内容没变时是空操作
+  （`ViewRootImpl` 的 `GestureExclusionTracker` 比对后不回报），同一条消息里
+  清空+写回会被合并成「没变」，等于没报。
+- 触发点：触摸性切换（`syncWindowTouchable`）、抽屉窗真正
+  `removeViewImmediate` 之后、设置页开关（`refreshGestureExclusion`）。
+- 连续补两次（+140ms / +360ms）：窗口标志的变更是 `updateViewLayout` 异步落到 WMS 的，
+  报告跑在前面时平台看到的还是「不可触摸」，重算结果依旧是空。
+
+验证方法（真机）：`adb shell dumpsys window -a | grep mSystemGestureExclusion`
+应等于手柄图层的矩形；注入触摸在 Android 16 上触发不了返回手势，只能真手指验效果。
+
 ## 注入链路
 
 `PadController` 只依赖 `Injector` 接口。`PadService.reconnectController()` 根据持久化的注入通道和 Shizuku 是否可用，创建 `GestureInjector` 或 `ShizukuInjector`。

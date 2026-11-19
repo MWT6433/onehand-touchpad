@@ -615,10 +615,12 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         if (clickModeWindow) {
             // 单击模式这扇小窗就是手柄本体，尺寸正好是竖条。
-            applyTouchable(panelParams, !handleSuppressed);
+            if (applyTouchable(panelParams, !handleSuppressed)) {
+                forceResendGestureExclusion("click_touchable");
+            }
             return;
         }
-        applyTouchable(panelParams, state != State.SETTLED && !handleSuppressed);
+        boolean touchableChanged = applyTouchable(panelParams, state != State.SETTLED && !handleSuppressed);
         if (handleLayerAttached) {
             // 手势可能还挂在这层上（PULLING / ADJUST 都从手柄起手），所以这两个状态
             // 必须保持可触摸；面板静止在外面时才关掉，把"点面板外收回"还给面板窗。
@@ -627,9 +629,15 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                     && !handleSuppressed;
             if (applyTouchable(handleLayerParams, layerTouchable)) {
                 handleLayerDirty = true;
+                touchableChanged = true;
             }
         } else {
-            applyTouchable(panelParams, !handleSuppressed);
+            touchableChanged |= applyTouchable(panelParams, !handleSuppressed);
+        }
+        // 排除区只对"可触摸"的窗口生效（见 forceResendGestureExclusion 的注释），
+        // 所以触摸性一变就得让平台重算。
+        if (touchableChanged) {
+            forceResendGestureExclusion("touchable");
         }
     }
 
@@ -969,6 +977,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 } catch (RuntimeException ignored) {
                     // The accessibility window may already have been detached.
                 }
+                // 全屏抽屉窗摘掉后平台不会自己重算排除区（真机实测会一直停在空），
+                // 必须在这里补报一次，边缘手势屏蔽才会回来。
+                forceResendGestureExclusion("switcher_closed");
             });
         }
         taskSwitcherAttached = false;
@@ -2659,11 +2670,59 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
     }
 
-    /** 设置页切换开关后立刻生效，不必重建窗口：清掉缓存尺寸再按当前开关重报一次。 */
-    void refreshGestureExclusion() {
+    /**
+     * 强制让系统重算一次排除区。
+     *
+     * <p>{@link View#setSystemGestureExclusionRects} 在列表内容没变时是空操作
+     * （ViewRootImpl 的 GestureExclusionTracker 比对后不再回报），所以"窗口尺寸没变、
+     * 但平台那边的计算结果已经过期"的场合必须清空一次、隔一条消息再写回。
+     *
+     * <p>为什么要连续补两次：窗口标志的变更要走 WMS 那边异步生效，报告跑在它前面时
+     * 平台算出来的还是"不可触摸 → 无排除区"，真机实测第二次开关抽屉就会踩到。
+     *
+     * <p>为什么非重报不可：DisplayContent.calculateSystemGestureExclusion() 自顶向下
+     * 遍历窗口，每个窗口的排除区只保留"它仍然可触摸、且没有被更上层窗口盖住"的那部分
+     * （unhandled 逐层相减）。任务切换器是一扇全屏可触摸的浮窗，它一出现就把整屏
+     * unhandled 吃光，手柄的排除区归零；而窗口被移除时平台不会自己重算，于是会永久
+     * 停在"空"，直到有人重新上报一次。
+     */
+    private void forceResendGestureExclusion(String reason) {
+        forceResendGestureExclusion(reason, 0);
+    }
+
+    private void forceResendGestureExclusion(String reason, int attempt) {
+        if (!panelAttached || panelView == null) {
+            return;
+        }
         gestureExclusionWidth = -1;
         gestureExclusionHeight = -1;
-        applyHandleGestureExclusion();
+        try {
+            panelView.setSystemGestureExclusionRects(Collections.emptyList());
+            if (handleLayerAttached && handleLayerView != null) {
+                handleLayerView.setSystemGestureExclusionRects(Collections.emptyList());
+            }
+        } catch (RuntimeException exception) {
+            log.warn("GESTURE", "resend=clear_failed " + exception.getClass().getSimpleName());
+        }
+        mainHandler.post(() -> {
+            applyHandleGestureExclusion();
+            log.info("GESTURE", "resend reason=" + reason
+                    + " w=" + gestureExclusionWidth + " h=" + gestureExclusionHeight);
+        });
+        // 窗口标志是异步落到 WMS 的（updateViewLayout 是 oneway）：重报早于
+        // FLAG_NOT_TOUCHABLE 生效时，平台遍历看到的还是"不可触摸"，重算结果依旧是空
+        // （真机实测：连续开关两次抽屉，第二次就会踩到）。所以再补两次，等标志落定。
+        if (attempt < 2) {
+            int next = attempt + 1;
+            mainHandler.postDelayed(
+                    () -> forceResendGestureExclusion(reason + "#" + next, next),
+                    140L + attempt * 220L);
+        }
+    }
+
+    /** 设置页切换开关后立刻生效，不必重建窗口：清缓存尺寸 + 强制重报一次。 */
+    void refreshGestureExclusion() {
+        forceResendGestureExclusion("toggle=" + prefs.getGestureExclusion());
     }
 
     private void performPanelLayoutUpdate(long now) {
