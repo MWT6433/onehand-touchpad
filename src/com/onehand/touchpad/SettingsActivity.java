@@ -584,14 +584,30 @@ public final class SettingsActivity extends Activity {
         interactionCard.addView(handleHeightSeekBar, seekParams);
     }
 
-    private void buildSwitchRows(LinearLayout content) {
-        LinearLayout interactionCard;
-        LinearLayout.LayoutParams rowParams;
+    private void addRowDivider(LinearLayout content) {
+        LinearLayout divider = new LinearLayout(this);
+        divider.setBackgroundColor(COLOR_DIVIDER);
+        content.addView(divider, matchHeight(dp(1)));
+    }
 
-        interactionCard = createSwitchRowLayout();
-        LinearLayout longPressDragLabels = createSwitchLabelGroup(
+    /**
+     * 主页开关区：只留用户日常会用的两个。
+     *
+     * <p>「长按后拖动」「屏蔽边缘手势」是调试 / 排障向的，和「键盘避让」一起收进调试抽屉
+     * （用户 2026-11-19 定：主页只放最常用的，抽屉里的开关不受调试门控）。
+     */
+    private void buildSwitchRows(LinearLayout content) {
+        buildClickModeRow(content);
+        addRowDivider(content);
+        buildDoubleTapSwitcherRow(content);
+    }
+
+    /** 长按后拖动（调试抽屉）。 */
+    private void buildLongPressDragRow(LinearLayout content) {
+        LinearLayout row = createSwitchRowLayout();
+        LinearLayout labels = createSwitchLabelGroup(
                 "长按后拖动", "松手后继续拖动，不必重新按");
-        interactionCard.addView(longPressDragLabels, new LinearLayout.LayoutParams(
+        row.addView(labels, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         longPressDragCheckBox = new Switch(this);
@@ -609,24 +625,23 @@ public final class SettingsActivity extends Activity {
                     "long_press_drag=" + (checked ? "on" : "off"));
             PadService.reloadController();
         });
-        LinearLayout.LayoutParams longPressDragParams = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams switchParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
-        longPressDragParams.gravity = Gravity.CENTER_VERTICAL;
-        interactionCard.addView(longPressDragCheckBox, longPressDragParams);
-        ((TextView) longPressDragLabels.getChildAt(0)).setLabelFor(
+        switchParams.gravity = Gravity.CENTER_VERTICAL;
+        row.addView(longPressDragCheckBox, switchParams);
+        ((TextView) labels.getChildAt(0)).setLabelFor(
                 longPressDragCheckBox.getId());
-        rowParams = matchHeight(dp(60));
+        LinearLayout.LayoutParams rowParams = matchHeight(dp(60));
         rowParams.topMargin = dp(10);
-        content.addView(interactionCard, rowParams);
+        content.addView(row, rowParams);
+    }
 
-        LinearLayout divider = new LinearLayout(this);
-        divider.setBackgroundColor(COLOR_DIVIDER);
-        content.addView(divider, matchHeight(dp(1)));
-
-        interactionCard = createSwitchRowLayout();
-        LinearLayout clickLabels = createSwitchLabelGroup(
+    /** 单击模式（主页）。 */
+    private void buildClickModeRow(LinearLayout content) {
+        LinearLayout row = createSwitchRowLayout();
+        LinearLayout labels = createSwitchLabelGroup(
                 "单击模式", "拖出光标，松手即点击");
-        interactionCard.addView(clickLabels, new LinearLayout.LayoutParams(
+        row.addView(labels, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         clickModeSwitch = new Switch(this);
@@ -642,23 +657,22 @@ public final class SettingsActivity extends Activity {
             ProbeLog.get().info("PREF", "click_mode=" + (checked ? "on" : "off"));
             PadService.reloadController();
         });
-        LinearLayout.LayoutParams clickModeParams = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams switchParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
-        clickModeParams.gravity = Gravity.CENTER_VERTICAL;
-        interactionCard.addView(clickModeSwitch, clickModeParams);
-        ((TextView) clickLabels.getChildAt(0)).setLabelFor(clickModeSwitch.getId());
-        rowParams = matchHeight(dp(60));
+        switchParams.gravity = Gravity.CENTER_VERTICAL;
+        row.addView(clickModeSwitch, switchParams);
+        ((TextView) labels.getChildAt(0)).setLabelFor(clickModeSwitch.getId());
+        LinearLayout.LayoutParams rowParams = matchHeight(dp(60));
         rowParams.topMargin = dp(10);
-        content.addView(interactionCard, rowParams);
+        content.addView(row, rowParams);
+    }
 
-        divider = new LinearLayout(this);
-        divider.setBackgroundColor(COLOR_DIVIDER);
-        content.addView(divider, matchHeight(dp(1)));
-
-        interactionCard = createSwitchRowLayout();
-        LinearLayout gestureExclusionLabels = createSwitchLabelGroup(
+    /** 屏蔽边缘手势（调试抽屉）。 */
+    private void buildGestureExclusionRow(LinearLayout content) {
+        LinearLayout row = createSwitchRowLayout();
+        LinearLayout labels = createSwitchLabelGroup(
                 "屏蔽边缘手势", "从手柄起手的滑动不触发系统返回");
-        interactionCard.addView(gestureExclusionLabels, new LinearLayout.LayoutParams(
+        row.addView(labels, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         gestureExclusionSwitch = new Switch(this);
@@ -675,24 +689,23 @@ public final class SettingsActivity extends Activity {
             ProbeLog.get().info("PREF", "gesture_exclusion=" + (checked ? "on" : "off"));
             PadService.refreshGestureExclusion();
         });
-        LinearLayout.LayoutParams gestureExclusionParams = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams switchParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
-        gestureExclusionParams.gravity = Gravity.CENTER_VERTICAL;
-        interactionCard.addView(gestureExclusionSwitch, gestureExclusionParams);
-        ((TextView) gestureExclusionLabels.getChildAt(0)).setLabelFor(
+        switchParams.gravity = Gravity.CENTER_VERTICAL;
+        row.addView(gestureExclusionSwitch, switchParams);
+        ((TextView) labels.getChildAt(0)).setLabelFor(
                 gestureExclusionSwitch.getId());
-        rowParams = matchHeight(dp(60));
+        LinearLayout.LayoutParams rowParams = matchHeight(dp(60));
         rowParams.topMargin = dp(10);
-        content.addView(interactionCard, rowParams);
+        content.addView(row, rowParams);
+    }
 
-        divider = new LinearLayout(this);
-        divider.setBackgroundColor(COLOR_DIVIDER);
-        content.addView(divider, matchHeight(dp(1)));
-
-        interactionCard = createSwitchRowLayout();
-        LinearLayout doubleTapSwitcherLabels = createSwitchLabelGroup(
+    /** 双击打开任务面板（主页）+ 没有 Shizuku 时的红字提示。 */
+    private void buildDoubleTapSwitcherRow(LinearLayout content) {
+        LinearLayout row = createSwitchRowLayout();
+        LinearLayout labels = createSwitchLabelGroup(
                 "双击打开任务面板", "双击侧边手柄查看最近使用的应用");
-        interactionCard.addView(doubleTapSwitcherLabels, new LinearLayout.LayoutParams(
+        row.addView(labels, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         doubleTapSwitcherSwitch = new Switch(this);
@@ -709,15 +722,15 @@ public final class SettingsActivity extends Activity {
             ProbeLog.get().info("PREF", "double_tap_switcher=" + (checked ? "on" : "off"));
             refreshTaskCapabilityHint();
         });
-        LinearLayout.LayoutParams doubleTapSwitcherParams = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams switchParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(48));
-        doubleTapSwitcherParams.gravity = Gravity.CENTER_VERTICAL;
-        interactionCard.addView(doubleTapSwitcherSwitch, doubleTapSwitcherParams);
-        ((TextView) doubleTapSwitcherLabels.getChildAt(0)).setLabelFor(
+        switchParams.gravity = Gravity.CENTER_VERTICAL;
+        row.addView(doubleTapSwitcherSwitch, switchParams);
+        ((TextView) labels.getChildAt(0)).setLabelFor(
                 doubleTapSwitcherSwitch.getId());
-        rowParams = matchHeight(dp(60));
+        LinearLayout.LayoutParams rowParams = matchHeight(dp(60));
         rowParams.topMargin = dp(10);
-        content.addView(interactionCard, rowParams);
+        content.addView(row, rowParams);
 
         // 没有 Shizuku 时，这个开关做的事会明显缩水：列表只有应用级、没有 ×。
         // 提示直接跟在开关下面（用户实测最容易被这两点坑到）。
@@ -1199,6 +1212,8 @@ public final class SettingsActivity extends Activity {
         logScrollView = null;
         sideButton = null;
         keyboardLiftSwitch = null;
+        longPressDragCheckBox = null;
+        gestureExclusionSwitch = null;
         // 注意：Shizuku 行现在在主页，不随抽屉重建——这里不能把它的引用置空，
         // 否则 refreshShizukuControls() 之后再也更新不到那一行（P80 真机踩过）。
 
@@ -1259,11 +1274,14 @@ public final class SettingsActivity extends Activity {
         debugModeLabel.setLabelFor(debugModeSwitch.getId());
         debugDrawerContent.addView(debugModeRow, matchHeight(dp(48)));
 
-        LinearLayout keyboardLiftDivider = new LinearLayout(this);
-        keyboardLiftDivider.setBackgroundColor(COLOR_DIVIDER);
-        debugDrawerContent.addView(keyboardLiftDivider, matchHeight(dp(1)));
-        // 不受调试门控：抽屉里开关本身照常可见可切，只有探针/日志才受门控。
+        // 下面这几个开关不受调试门控：调试关着也照常可见可切，只有探针/日志才受门控。
+        addRowDivider(debugDrawerContent);
         buildKeyboardLiftRow(debugDrawerContent);
+        addRowDivider(debugDrawerContent);
+        buildLongPressDragRow(debugDrawerContent);
+        addRowDivider(debugDrawerContent);
+        buildGestureExclusionRow(debugDrawerContent);
+        addRowDivider(debugDrawerContent);
 
         Button resetGuideButton = createDrawerButton("重新显示引导");
         resetGuideButton.setOnClickListener(view -> {
@@ -1796,8 +1814,16 @@ public final class SettingsActivity extends Activity {
                 ProbeLog.get().info("UI_SYNC", "click_mode=" + (clickMode ? "1" : "0"));
             }
             boolean lpd = settingsPrefs.getLongPressDrag();
-            if (longPressDragCheckBox.isChecked() != lpd) {
+            // 这两个开关在调试抽屉里，抽屉没打开时是 null。
+            if (longPressDragCheckBox != null
+                    && longPressDragCheckBox.isChecked() != lpd) {
                 longPressDragCheckBox.setChecked(lpd);
+            }
+            if (gestureExclusionSwitch != null) {
+                boolean exclusion = settingsPrefs.getGestureExclusion();
+                if (gestureExclusionSwitch.isChecked() != exclusion) {
+                    gestureExclusionSwitch.setChecked(exclusion);
+                }
             }
             boolean shizuku = Prefs.INJECT_CHANNEL_SHIZUKU.equals(
                     settingsPrefs.getInjectChannel());
