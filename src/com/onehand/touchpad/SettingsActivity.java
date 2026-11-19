@@ -296,7 +296,6 @@ public final class SettingsActivity extends Activity {
         content.addView(dashboardContainer);
         addGaugeGrid(dashboardContainer);
         buildHandlePositionRow(content);
-        buildKeyboardLiftRow(content);
         buildShizukuRow(content);
 
         switchRowsContainer = new LinearLayout(this);
@@ -1199,6 +1198,7 @@ public final class SettingsActivity extends Activity {
         targetCountText = null;
         logScrollView = null;
         sideButton = null;
+        keyboardLiftSwitch = null;
         // 注意：Shizuku 行现在在主页，不随抽屉重建——这里不能把它的引用置空，
         // 否则 refreshShizukuControls() 之后再也更新不到那一行（P80 真机踩过）。
 
@@ -1258,6 +1258,12 @@ public final class SettingsActivity extends Activity {
         debugModeRow.addView(debugModeSwitch, debugModeParams);
         debugModeLabel.setLabelFor(debugModeSwitch.getId());
         debugDrawerContent.addView(debugModeRow, matchHeight(dp(48)));
+
+        LinearLayout keyboardLiftDivider = new LinearLayout(this);
+        keyboardLiftDivider.setBackgroundColor(COLOR_DIVIDER);
+        debugDrawerContent.addView(keyboardLiftDivider, matchHeight(dp(1)));
+        // 不受调试门控：抽屉里开关本身照常可见可切，只有探针/日志才受门控。
+        buildKeyboardLiftRow(debugDrawerContent);
 
         Button resetGuideButton = createDrawerButton("重新显示引导");
         resetGuideButton.setOnClickListener(view -> {
