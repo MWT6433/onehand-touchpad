@@ -70,6 +70,8 @@ final class Prefs {
     private static final String KEY_Y_PERCENT = "y_percent";
     private static final String KEY_ONBOARDED = "onboarded";
     private static final String KEY_KEYBOARD_LIFT = "keyboard_lift";
+    private static final String KEY_SHIZUKU_DEFAULTS_APPLIED = "shizuku_defaults_applied";
+    private static final String KEY_SHIZUKU_EVER_AUTHORIZED = "shizuku_ever_authorized";
     private static final String KEY_GUIDE_FORCED = "guide_forced";
 
     private final SharedPreferences preferences;
@@ -190,6 +192,54 @@ final class Prefs {
 
     boolean getDoubleTapSwitcher() {
         return preferences.getBoolean(DOUBLE_TAP_SWITCHER, DOUBLE_TAP_SWITCHER_DEFAULT);
+    }
+
+    /** Shizuku 当前可用（binder 活着 + 已授权）。 */
+    static boolean shizukuAuthorized() {
+        return ShizukuClient.isBinderAlive() && ShizukuClient.isPermissionGranted();
+    }
+
+    /**
+     * 装完第一次跑：没授权 Shizuku 就把两个依赖它的开关关掉（用户 2026-11-19 定）。
+     *
+     * <p>只跑一次。若这时候已经有授权，只记下"曾经授权过"，不动开关；
+     * 这样用户以后手动关掉的开关不会被一次重新授权又打开。
+     */
+    void applyShizukuGatedDefaults() {
+        if (preferences.getBoolean(KEY_SHIZUKU_DEFAULTS_APPLIED, false)) {
+            return;
+        }
+        // 只有全新安装才关：老用户升级上来时 prefs 已经有若干键（缩放/灵敏度/手柄尺寸…），
+        // 不能因为升级那一刻 Shizuku 没起来就把人家手动开着的开关关掉。
+        boolean freshInstall = preferences.getAll().size() <= 3;
+        android.content.SharedPreferences.Editor editor = preferences.edit();
+        if (freshInstall && !shizukuAuthorized()) {
+            editor.putBoolean(LONG_PRESS_DRAG, false);
+            editor.putBoolean(DOUBLE_TAP_SWITCHER, false);
+        } else if (shizukuAuthorized()) {
+            editor.putBoolean(KEY_SHIZUKU_EVER_AUTHORIZED, true);
+        }
+        editor.putBoolean(KEY_SHIZUKU_DEFAULTS_APPLIED, true).apply();
+    }
+
+    /**
+     * Shizuku 第一次被授权：把两个依赖它的开关打开，只做一次，之后听用户的。
+     *
+     * @return 这次是否真的翻转了开关
+     */
+    boolean onShizukuFirstAuthorized() {
+        if (!shizukuAuthorized()) {
+            return false;
+        }
+        if (preferences.getBoolean(KEY_SHIZUKU_EVER_AUTHORIZED, false)) {
+            return false;
+        }
+        preferences.edit()
+                .putBoolean(KEY_SHIZUKU_EVER_AUTHORIZED, true)
+                .putBoolean(LONG_PRESS_DRAG, true)
+                .putBoolean(DOUBLE_TAP_SWITCHER, true)
+                .apply();
+        return true;
     }
 
     boolean getKeyboardLift() {

@@ -58,6 +58,7 @@ public final class PadService extends AccessibilityService {
         super.onServiceConnected();
         instance = this;
         Debug.refresh(this);
+        new Prefs(this).applyShizukuGatedDefaults();
         registerShizukuListeners();
         ProbeLog.get().info("SERVICE_CONNECT", "api=" + Build.VERSION.SDK_INT);
         reconnectController();
@@ -461,6 +462,7 @@ public final class PadService extends AccessibilityService {
     }
 
     private void recoverShizukuChannel() {
+        applyShizukuDependentDefaults();
         Prefs prefs = new Prefs(this);
         if (!Prefs.INJECT_CHANNEL_SHIZUKU.equals(prefs.getInjectChannel())) {
             return;
@@ -481,6 +483,16 @@ public final class PadService extends AccessibilityService {
             replaceInjector(true);
         } else if (!((ShizukuInjector) current).isBindingActive()) {
             replaceInjector(true);
+        }
+    }
+
+    /** 第一次拿到 Shizuku 授权：把「长按后拖动」「双击打开任务面板」打开（只做一次）。 */
+    private void applyShizukuDependentDefaults() {
+        Prefs prefs = new Prefs(this);
+        if (prefs.onShizukuFirstAuthorized()) {
+            ProbeLog.get().info("SHIZUKU",
+                    "first_authorized defaults_on=long_press_drag,double_tap_switcher");
+            reloadController();
         }
     }
 

@@ -97,6 +97,7 @@ public final class SettingsActivity extends Activity {
     private Switch gestureExclusionSwitch;
     private Switch doubleTapSwitcherSwitch;
     private Switch keyboardLiftSwitch;
+    private TextView longPressHint;
     private Switch shizukuInjectCheckBox;
     private Button sideButton;
     private TextView shizukuStatusText;
@@ -181,6 +182,9 @@ public final class SettingsActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         settingsPrefs = new Prefs(this);
+        // 装完第一次跑：没 Shizuku 授权就把两个依赖它的开关关掉；已经有授权只记一笔。
+        settingsPrefs.applyShizukuGatedDefaults();
+        settingsPrefs.onShizukuFirstAuthorized();
         Debug.refresh(this);
         applyDevSideIntent(getIntent());
         rootView = new ProbeTargetView(this);
@@ -623,6 +627,7 @@ public final class SettingsActivity extends Activity {
             settingsPrefs.setLongPressDrag(checked);
             ProbeLog.get().info("PREF",
                     "long_press_drag=" + (checked ? "on" : "off"));
+            refreshLongPressHint();
             PadService.reloadController();
         });
         LinearLayout.LayoutParams switchParams = new LinearLayout.LayoutParams(
@@ -634,6 +639,17 @@ public final class SettingsActivity extends Activity {
         LinearLayout.LayoutParams rowParams = matchHeight(dp(60));
         rowParams.topMargin = dp(10);
         content.addView(row, rowParams);
+
+        // 没有 Shizuku 时，这条链只能走无障碍注入，实测可能不稳（用户 2026-11-19 定）。
+        longPressHint = createText(
+                "没有 Shizuku：实现可能不稳定", 12f, COLOR_DANGER, false);
+        longPressHint.setVisibility(View.GONE);
+        LinearLayout.LayoutParams hintParams = matchWrap();
+        hintParams.leftMargin = dp(8);
+        hintParams.rightMargin = dp(8);
+        hintParams.bottomMargin = dp(6);
+        content.addView(longPressHint, hintParams);
+        refreshLongPressHint();
     }
 
     /** 单击模式（主页）。 */
@@ -1212,6 +1228,7 @@ public final class SettingsActivity extends Activity {
         logScrollView = null;
         sideButton = null;
         keyboardLiftSwitch = null;
+        longPressHint = null;
         longPressDragCheckBox = null;
         gestureExclusionSwitch = null;
         // 注意：Shizuku 行现在在主页，不随抽屉重建——这里不能把它的引用置空，
@@ -1605,6 +1622,18 @@ public final class SettingsActivity extends Activity {
      * 只有「Shizuku 开关关着」且「双击打开任务面板开着」时，任务面板才会在不被提醒的情况下缩水。
      * 开关打开但没连上不用这里再说——Shizuku 那一行的副标题自己会写「未授权 / 未运行」。
      */
+    /** 「没有 Shizuku：实现可能不稳定」的判据——和任务面板那行红字同一套规则。 */
+    private void refreshLongPressHint() {
+        if (longPressHint == null || longPressDragCheckBox == null) {
+            return; // 抽屉没打开
+        }
+        boolean shizukuSwitchOn = Prefs.INJECT_CHANNEL_SHIZUKU.equals(
+                settingsPrefs.getInjectChannel());
+        boolean longPressOn = longPressDragCheckBox.isChecked();
+        longPressHint.setVisibility(
+                !shizukuSwitchOn && longPressOn ? View.VISIBLE : View.GONE);
+    }
+
     private void refreshTaskCapabilityHint() {
         if (shizukuTaskHint == null) {
             return;
@@ -1615,6 +1644,7 @@ public final class SettingsActivity extends Activity {
                 && doubleTapSwitcherSwitch.isChecked();
         shizukuTaskHint.setVisibility(
                 !shizukuSwitchOn && switcherOn ? View.VISIBLE : View.GONE);
+        refreshLongPressHint();
     }
 
     private void refreshShizukuControls() {
@@ -1722,6 +1752,8 @@ public final class SettingsActivity extends Activity {
     }
 
     private void refreshStatus() {
+        // 用户可能在别处刚授权了 Shizuku：先补开两个开关，末尾那句 syncPrefsIntoUi 会把 UI 跟上。
+        settingsPrefs.onShizukuFirstAuthorized();
         boolean enabled = isPadServiceEnabled();
         boolean running = PadService.isRunning();
         boolean onboarded = settingsPrefs.isOnboarded();
@@ -1819,6 +1851,12 @@ public final class SettingsActivity extends Activity {
                     && longPressDragCheckBox.isChecked() != lpd) {
                 longPressDragCheckBox.setChecked(lpd);
             }
+            if (doubleTapSwitcherSwitch != null) {
+                boolean switcher = settingsPrefs.getDoubleTapSwitcher();
+                if (doubleTapSwitcherSwitch.isChecked() != switcher) {
+                    doubleTapSwitcherSwitch.setChecked(switcher);
+                }
+            }
             if (gestureExclusionSwitch != null) {
                 boolean exclusion = settingsPrefs.getGestureExclusion();
                 if (gestureExclusionSwitch.isChecked() != exclusion) {
@@ -1855,6 +1893,7 @@ public final class SettingsActivity extends Activity {
             String side = settingsPrefs.getSide();
             syncHandleSideControls(side);
             refreshSideLabel();
+            refreshTaskCapabilityHint();
         } finally {
             uiSyncInProgress = false;
         }
