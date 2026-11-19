@@ -45,7 +45,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     // 手柄的触摸识别余量：手指落在竖条边缘、或略偏内侧一点时，仍然算点在
     // 手柄上（原来窗口宽度正好等于竖条，右缘一过就不派发事件，双击老是失败）。
     // 这笔余量是"吞掉的"，系统返回手势区域也随之扩大，1 个常量可调。
-    private static final int HANDLE_TOUCH_PAD_DP = 16;
+    // 手柄的触摸/排除余量。系统的排除区只能覆盖窗口自己的可触摸矩形，所以这个余量
+    // 同时也是"从竖条内侧被屏蔽多宽"：24dp 让整条 40dp 以上的边缘带子都归触控板。
+    private static final int HANDLE_TOUCH_PAD_DP = 24;
     /** 抽屉挂上时的 alpha：不用 0，避免任何"零 alpha 不绘制"的优化把首帧回调吞掉。 */
     private static final float SWITCHER_ATTACH_ALPHA = 0.01f;
 
@@ -535,7 +537,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         handleLayerView.setHandleTouchPad(0f);
         handleLayerView.setHandleMode();
         handleLayerParams = createPanelParams();
-        handleLayerParams.width = handleWidth + handleTouchPad;
+        handleLayerParams.width = handleLayerWidth();
         handleLayerParams.height = handleHeight;
         handleLayerParams.x = handleLayerX();
         handleLayerParams.y = settledY;
@@ -583,13 +585,27 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     /**
-     * 手柄触摸层在屏幕上的 x：竖条左边界再往"屏幕内侧"让出识别余量。
-     * 左柄竖条贴在窗口右端（余量在右），右柄贴在窗口左端（余量在左）。
+     * 手柄触摸层在屏幕上的 x：**外侧顶到屏幕边缘**，内侧到竖条内侧再让出识别余量。
+     *
+     * <p>为什么外侧必须贴边：系统只把排除区算在窗口自己的可触摸矩形里
+     * （AOSP DisplayContent.calculateSystemGestureExclusion 的
+     * {@code local.op(touchableRegion, Op.INTERSECT)}），而返回手势恰恰从紧贴屏幕边缘
+     * 那条带子起手。竖条本身离边缘还有 {@link #HANDLE_EDGE_MARGIN_DP} 的视觉留白，
+     * 触摸层原来从竖条边界才开始，那段留白就成了一条"没被屏蔽的边缘"——从那里起手
+     * 照样是返回手势（真机反馈：从竖条靠屏幕内侧那一侧起手也能触发返回）。
      */
     private int handleLayerX() {
-        float barLeft = panelView.handleLeftInWindow(windowWidth);
-        float layerLeft = isLeftEdge() ? barLeft : barLeft - handleTouchPad;
-        return panelParams.x + Math.round(layerLeft);
+        return isLeftEdge() ? 0 : Math.round(screenWidth - handleLayerWidth());
+    }
+
+    /** 触摸层宽度 = 屏幕边缘 → 竖条内侧 + 识别余量（两侧对称处理）。 */
+    private int handleLayerWidth() {
+        float barLeftInWindow = panelView.handleLeftInWindow(windowWidth);
+        float barWidth = Math.min(windowWidth, handleWidth);
+        float screenBarLeft = panelParams.x + barLeftInWindow;
+        return Math.round(isLeftEdge()
+                ? screenBarLeft + barWidth + handleTouchPad
+                : screenWidth - screenBarLeft + handleTouchPad);
     }
 
     private boolean applyTouchable(WindowManager.LayoutParams params, boolean touchable) {
@@ -657,12 +673,13 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private WindowManager.LayoutParams createClickModeHandleParams() {
         WindowManager.LayoutParams params = createPanelParams();
-        // 单击模式用的是独立小窗，同样要带识别余量（余量留在朝屏幕内侧那边）。
-        params.width = handleWidth + handleTouchPad;
+        // 单击模式这扇小窗既是手柄本体、也是排除区的载体：横向同样要从屏幕边缘一直铺到
+        // "竖条内侧 + 余量"（竖条自身仍留在 HANDLE_EDGE_MARGIN_DP 那个视觉位置上，
+        // 那么多出来的外侧留白算在窗口里）。见 handleLayerX() 的注释。
+        int width = Math.round(edgeInset + handleWidth + handleTouchPad);
+        params.width = width;
         params.height = handleHeight;
-        params.x = isLeftEdge()
-                ? edgeInset
-                : Math.max(0, screenWidth - handleWidth - edgeInset - handleTouchPad);
+        params.x = isLeftEdge() ? 0 : Math.max(0, screenWidth - width);
         params.y = settledY;
         return params;
     }
