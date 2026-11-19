@@ -4,4 +4,6 @@
     <string name="pad_desc">在屏幕边缘显示可拖出的虚拟触控板，并通过无障碍手势向屏幕像素坐标注入点击、长按和滑动。</string>
     <string name="shortcut_toggle_short">触控板开关</string>
     <string name="shortcut_toggle_long">切换触控板 开 / 关</string>
+    <string name="shortcut_side_short">切换左右手</string>
+    <string name="shortcut_side_long">把触控板手柄换到另一侧</string>
 </resources>

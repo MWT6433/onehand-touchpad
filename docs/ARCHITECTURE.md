@@ -26,7 +26,7 @@
 | `ShizukuInjectionService.java` | 运行在 Shizuku 用户服务进程，把 `MotionEvent` 送入系统输入通道。 | `send`、`probeBackend`、`injectInputEvent` |
 | `ShizukuInjector.java` | 绑定 Shizuku 输入服务、处理权限/Binder 变化，并在失败时回退无障碍路径。 | `fallbackReason`、`sendInput`、`INJECT_FALLBACK` |
 | `ShizukuSettingsService.java` | Shizuku 用户服务中的 `settings put secure` 桥接层。 | `putSecure`、`ISettingsApi` |
-| `ShortcutPublisher.java` | 发布“切换触控板 开 / 关”的桌面动态快捷方式。 | `ID_TOGGLE_PAD`、`ensure` |
+| `ShortcutPublisher.java` | 发布桌面动态快捷方式：`toggle_pad`（开关）、`switch_side`（切换左右手）。 | `ID_TOGGLE_PAD`、`ID_SWITCH_SIDE`、`ensure` |
 | `SideToggleBar.java` | 独立的上下双箭头长条，点击后切换光标方位。 | `onTouchEvent`、`performClick` |
 
 ## 窗口体系

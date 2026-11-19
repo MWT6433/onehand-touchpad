@@ -41,6 +41,25 @@ final class PadToggle {
         return false;
     }
 
+    /** 另一侧（按 prefs 现读）。 */
+    static String otherSide(Context ctx) {
+        return Prefs.SIDE_LEFT.equals(new Prefs(ctx).getSide())
+                ? Prefs.SIDE_RIGHT : Prefs.SIDE_LEFT;
+    }
+
+    /**
+     * 快捷方式入口：切左右手。先写 prefs（服务没跑也算切了，下次启动按新侧），
+     * 服务在跑就顺带原地生效。
+     */
+    static boolean switchSide(Context ctx, String source) {
+        String target = otherSide(ctx);
+        new Prefs(ctx).setSide(target);
+        boolean applied = PadService.switchSide(target);
+        ProbeLog.get().info("SIDE", "source=" + (source == null ? "unknown" : source)
+                + " target=" + target + " applied=" + (applied ? 1 : 0));
+        return true;
+    }
+
     static int toggle(Context ctx, String source) {
         if (source == null) {
             source = "unknown";

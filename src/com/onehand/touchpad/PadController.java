@@ -1964,6 +1964,31 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 + " windowW=" + windowWidth + " handleW=" + handleWidth);
     }
 
+    /**
+     * 快捷方式要求的切换左右手：原地生效（P53 口径），不重建窗口。
+     *
+     * <p>面板正在外面（拉出/调整/收回）时只改 prefs，等下一次停靠自然按新侧对齐——
+     * 这时硬切会把正在拖的窗口挪走。单击模式的小窗几何走另一套（按 prefs 现算），
+     * 也不在这里动，下次重建即生效。
+     */
+    boolean switchSideNow(String targetSide) {
+        if (!Prefs.SIDE_LEFT.equals(targetSide) && !Prefs.SIDE_RIGHT.equals(targetSide)) {
+            return false;
+        }
+        boolean changed = !targetSide.equals(side);
+        prefs.setSide(targetSide);
+        boolean inPlace = false;
+        if (changed && panelAttached && !clickModeWindow && state == State.SETTLED) {
+            applySideInPlace(targetSide);
+            inPlace = true;
+        }
+        // 窗口换了位置，排除区必须重报（尺寸没变，applyHandleGestureExclusion 会去重跳过）。
+        forceResendGestureExclusion("side=" + targetSide);
+        log.info("SIDE", "source=api side=" + targetSide
+                + " changed=" + (changed ? 1 : 0) + " inplace=" + (inPlace ? 1 : 0));
+        return changed;
+    }
+
     private void ensurePullCursorShown(float dx, float dy) {
         if (pullCursorLocked) {
             return;
@@ -2735,6 +2760,15 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                     () -> forceResendGestureExclusion(reason + "#" + next, next),
                     140L + attempt * 220L);
         }
+    }
+
+    /**
+     * 供无障碍服务在"窗口状态变了"之后调用：前台窗口的增减会重算显示级排除区
+     * （平台只算没被上层盖住的部分），而窗口摘掉后平台不会自己再算一次。
+     * 节流交给调用方（PadService）。
+     */
+    void reassertGestureExclusion(String reason) {
+        forceResendGestureExclusion("reassert:" + reason);
     }
 
     /** 设置页切换开关后立刻生效，不必重建窗口：清缓存尺寸 + 强制重报一次。 */

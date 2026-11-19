@@ -29,7 +29,11 @@ public final class PadService extends AccessibilityService {
                     "com.android.launcher3",
                     "com.google.android.apps.nexuslauncher",
                     "com.android.systemui")));
+    /** 窗口事件驱动的排除区补报节流：系统界面切换很密，别每个事件都重报三次。 */
+    private static final long EXCLUSION_REASSERT_INTERVAL_MS = 600L;
+
     private static volatile PadService instance;
+    private long lastExclusionReassertMs;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Shizuku.OnBinderReceivedListener shizukuBinderReceivedListener =
@@ -96,6 +100,10 @@ public final class PadService extends AccessibilityService {
         if (packageName.isEmpty()) {
             return;
         }
+        // 前台窗口每变一次，显示级排除区都会被重算（AOSP 只算没被上层盖住的部分）；
+        // 而窗口摘掉之后平台不会自己再算一次——真机表现就是"某个界面开过一次之后
+        // 边缘手势屏蔽就没了"。这里按窗口事件节流补报，把排除区拉回来。
+        maybeReassertGestureExclusion();
         if (NON_APP_FOREGROUND_PACKAGES.contains(packageName)) {
             if (!"com.onehand.touchpad".equals(packageName)) {
                 clearForegroundPackage();
@@ -103,6 +111,18 @@ public final class PadService extends AccessibilityService {
             return;
         }
         recordForegroundPackage(packageName);
+    }
+
+    private void maybeReassertGestureExclusion() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastExclusionReassertMs < EXCLUSION_REASSERT_INTERVAL_MS) {
+            return;
+        }
+        lastExclusionReassertMs = now;
+        PadController current = controller;
+        if (current != null) {
+            current.reassertGestureExclusion("window_state");
+        }
     }
 
     String currentForegroundPackage() {
@@ -204,6 +224,19 @@ public final class PadService extends AccessibilityService {
         Injector current = service == null ? null : service.injector;
         return current instanceof ShizukuInjector
                 ? ((ShizukuInjector) current).currentApi() : null;
+    }
+
+    /**
+     * 快捷方式用：切左右手。服务没在跑就只落 prefs（下次启动按新侧），
+     * 在跑就回主线程原地切。返回值只表示"服务接了这个请求"。
+     */
+    static boolean switchSide(String side) {
+        PadService service = instance;
+        if (service == null || service.controller == null) {
+            return false;
+        }
+        service.mainHandler.post(() -> service.controller.switchSideNow(side));
+        return true;
     }
 
     static boolean reloadController() {

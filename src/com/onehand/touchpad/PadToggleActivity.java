@@ -9,11 +9,34 @@ import android.os.Bundle;
 import android.widget.Toast;
 
 public final class PadToggleActivity extends Activity {
+    /** 快捷方式用：不带这个 extra 时是开/关，带 switch_side 时切左右手。 */
+    static final String EXTRA_ACTION = "action";
+    static final String ACTION_SWITCH_SIDE = "switch_side";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         overridePendingTransition(0, 0);
         Context appContext = getApplicationContext();
+        Intent source = getIntent();
+        String action = source == null ? null : source.getStringExtra(EXTRA_ACTION);
+        if (ACTION_SWITCH_SIDE.equals(action)) {
+            Thread sideThread = new Thread(() -> {
+                PadToggle.switchSide(appContext, "shortcut");
+                String label = Prefs.SIDE_LEFT.equals(new Prefs(appContext).getSide())
+                        ? "手柄已换到左侧" : "手柄已换到右侧";
+                runOnUiThread(() -> {
+                    if (isFinishing()) {
+                        return;
+                    }
+                    Toast.makeText(this, label, Toast.LENGTH_SHORT).show();
+                    overridePendingTransition(0, 0);
+                    finish();
+                });
+            }, "SHORTCUT_SIDE");
+            sideThread.start();
+            return;
+        }
         Thread toggleThread = new Thread(() -> {
             int result = PadToggle.toggle(appContext, "shortcut");
             runOnUiThread(() -> {
