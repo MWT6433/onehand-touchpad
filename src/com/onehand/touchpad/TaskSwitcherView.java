@@ -79,6 +79,10 @@ final class TaskSwitcherView extends View {
      */
     private static final float MORPH_CONTENT_START = 0.45f;
     private static final float MORPH_CONTENT_FULL = 0.75f;
+    /** 行错峰：第 i 行从 MORPH_CONTENT_START + i*STAGGER 开始，WINDOW 内淡入并上浮。 */
+    private static final float MORPH_ROW_STAGGER = 0.06f;
+    private static final float MORPH_ROW_WINDOW = 0.30f;
+    private static final float ROW_RISE_DP = 6f;
     private static final float MORPH_SCRIM_FULL = 0.55f;
     private static final int TASK_CLOSE_MARK_DP = 7;
     private static final int TITLE_TOP_DP = 7;
@@ -394,7 +398,9 @@ final class TaskSwitcherView extends View {
                     + " ca=" + String.format(java.util.Locale.US, "%.1f", contentAlpha)
                     + " sa=" + String.format(java.util.Locale.US, "%.1f", scrimAlpha)
                     + " sx=" + String.format(java.util.Locale.US, "%.3f", sx)
-                    + " sy=" + String.format(java.util.Locale.US, "%.3f", sy));
+                    + " sy=" + String.format(java.util.Locale.US, "%.3f", sy)
+                    + " re=" + String.format(java.util.Locale.US, "%.2f,%.2f,%.2f",
+                            rowEase(0), rowEase(1), rowEase(2)));
         }
         scrimPaint.setAlpha(Math.round(scrimAlpha));
         canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
@@ -488,6 +494,12 @@ final class TaskSwitcherView extends View {
                 drawerTop + dp(TITLE_TOP_DP) - titleMetrics.ascent, titlePaint);
     }
 
+    /** 第 index 行的出场进度：0 = 未开始，1 = 到位。收起时按同一窗口反向返回。 */
+    private float rowEase(int index) {
+        float start = MORPH_CONTENT_START + index * MORPH_ROW_STAGGER;
+        return smoothstep(start, start + MORPH_ROW_WINDOW, morph);
+    }
+
     private void drawRows(Canvas canvas) {
         float lineLeft = drawerLeft + dp(DRAWER_PADDING_DP) + dp(ROW_INNER_PADDING_DP);
         float lineRight = drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP)
@@ -516,6 +528,14 @@ final class TaskSwitcherView extends View {
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
                     currentTop + rowHeight);
+            // 错峰：本行自己的 alpha 层 + 从下方 6dp 浮到位。整行一起动（含分割线与 ×），
+            // 否则行框先到位、文字后到，会看出两层壳。
+            float rowEase = rowEase(index);
+            int rowLayer = rowEase < 0.999f
+                    ? canvas.saveLayerAlpha(null, Math.round(255f * rowEase), Canvas.ALL_SAVE_FLAG)
+                    : -1;
+            int rowSave = canvas.save();
+            canvas.translate(0f, dp(ROW_RISE_DP) * (1f - rowEase));
             boolean foreground = isForeground(task);
             // 方向二：细分割线；与当前行相邻的那条让开，避免 T 形接头。
             if (index > 0 && !foreground && !isForeground(tasks.get(index - 1))) {
@@ -542,6 +562,10 @@ final class TaskSwitcherView extends View {
             drawTaskRow(canvas, task, rowRect);
             namePaint.setFakeBoldText(false);
             closeAlpha = CLOSE_ACTIVE_ALPHA;
+            canvas.restoreToCount(rowSave);
+            if (rowLayer >= 0) {
+                canvas.restoreToCount(rowLayer);
+            }
             currentTop += rowHeight + dp(ROW_GAP_DP);
         }
     }
