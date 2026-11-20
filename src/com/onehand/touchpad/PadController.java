@@ -78,9 +78,12 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final float RETRACT_CONTENT_FADE_END = 0.45f;
     private static final TimeInterpolator RETRACT_EASE =
             new PathInterpolator(0.65f, 0f, 0.15f, 1f);
-    /** 抽屉弹出：开头快、结尾慢；起手有冲劲，落地不用硬停。 */
+    /**
+     * 抽屉弹出：快起、收尾斜率归零（四段位移 56/28/13/3，起步斜率 2.67）。
+     * 旧曲线收尾斜率 0.31，最后一帧仍以约 6.8px/帧在动然后硬停，缺落定过程。
+     */
     private static final TimeInterpolator SWITCHER_OPEN_EASE =
-            new PathInterpolator(0.10f, 0.45f, 0.50f, 0.85f);
+            new PathInterpolator(0.15f, 0.40f, 0.35f, 1.00f);
     private static final String TAG = "OHTP";
     private static volatile String runtimeState = "未运行";
 

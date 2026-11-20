@@ -77,8 +77,9 @@ final class TaskSwitcherView extends View {
      * 现在内容在 0→45% 之间淡入淡出（此时卡片还小、且随卡片一起缩放），
      * 遮罩在 0→90% 之间铺开，末段两者一起自然收掉。
      */
-    private static final float MORPH_CONTENT_FULL = 0.45f;
-    private static final float MORPH_SCRIM_FULL = 0.90f;
+    private static final float MORPH_CONTENT_START = 0.45f;
+    private static final float MORPH_CONTENT_FULL = 0.75f;
+    private static final float MORPH_SCRIM_FULL = 0.55f;
     private static final int TASK_CLOSE_MARK_DP = 7;
     private static final int TITLE_TOP_DP = 7;
     private static final int TITLE_LINE_HEIGHT_DP = 12;
@@ -129,6 +130,7 @@ final class TaskSwitcherView extends View {
     /** 打开/收起形变进度：0 = 手柄矩形，1 = 抽屉矩形。 */
     // 初值必须是 0（= 手柄形态）：万一首帧在任何配置之前发生，也只能画成横条。
     private float morph = 0f;
+    private long probeT0 = 0L;
     /** 形变起点（手柄矩形），由控制器在开窗时写入。 */
     private final RectF handleRect = new RectF();
     private final RectF morphRect = new RectF();
@@ -358,19 +360,42 @@ final class TaskSwitcherView extends View {
         RectF card = drawerRect;
         float corner = drawerCorner;
         if (morph < 1f && !handleRect.isEmpty()) {
-            contentAlpha = smoothstep(0f, MORPH_CONTENT_FULL, morph);
+            // 内容推后：卡片长到 45% 才开始显，75% 全亮（原来 0→45% 之间就全亮，
+            // 卡片还只有 31% 宽时文字已满不透明，看着像把一张贴图摊开）。
+            contentAlpha = smoothstep(MORPH_CONTENT_START, MORPH_CONTENT_FULL, morph);
             morphRect.set(
                     handleRect.left + (drawerRect.left - handleRect.left) * morph,
                     handleRect.top + (drawerRect.top - handleRect.top) * morph,
                     handleRect.right + (drawerRect.right - handleRect.right) * morph,
                     handleRect.bottom + (drawerRect.bottom - handleRect.bottom) * morph);
             card = morphRect;
-            float handleCorner = dp(HANDLE_CORNER_DP);
-            corner = handleCorner + (drawerCorner - handleCorner) * morph;
+            // 圆角不再从 28dp 线性收到 16dp：那样在窄条上会被钳成胶囊、先鼓到约 94px
+            // 再瘪回 58.8px（形状先圆后方，读起来像被捏了一下）。
+            // 改成「终值上限 + 受短边约束」：窄条时自动是胶囊，宽度过 112px 后恒定 16dp。
+            corner = Math.min(drawerCorner, Math.min(card.width(), card.height()) * 0.5f);
         }
 
         // 遮罩走自己的曲线：挂到 contentAlpha 上会让末段"整屏突然一亮"。
-        float scrimAlpha = 0x99 * smoothstep(0f, MORPH_SCRIM_FULL, morph);
+        // 遮罩是屏幕上最大的明暗变化，它决定"这一下什么时候算开始"。
+        // 原来 smoothstep(0,0.90)：内容全亮时遮罩才 46%，前段背景几乎不动。
+        // 现在线性映射到 0.55 铺满——起步立即变暗，且比卡片先收住。
+        float scrimAlpha = 0x99 * Math.min(1f, Math.max(0f, morph / MORPH_SCRIM_FULL));
+        if (probeT0 == 0L) {
+            probeT0 = android.os.SystemClock.uptimeMillis();
+        }
+        {
+            float sx = drawerWidth > 0f ? card.width() / drawerWidth : 0f;
+            float sy = drawerHeight > 0f ? card.height() / drawerHeight : 0f;
+            android.util.Log.i("OHTP", "FRAME t=" + (android.os.SystemClock.uptimeMillis() - probeT0)
+                    + " m=" + String.format(java.util.Locale.US, "%.4f", morph)
+                    + " card=" + String.format(java.util.Locale.US, "%.1f,%.1f,%.1f,%.1f",
+                            card.left, card.top, card.right, card.bottom)
+                    + " corner=" + String.format(java.util.Locale.US, "%.1f", corner)
+                    + " ca=" + String.format(java.util.Locale.US, "%.1f", contentAlpha)
+                    + " sa=" + String.format(java.util.Locale.US, "%.1f", scrimAlpha)
+                    + " sx=" + String.format(java.util.Locale.US, "%.3f", sx)
+                    + " sy=" + String.format(java.util.Locale.US, "%.3f", sy));
+        }
         scrimPaint.setAlpha(Math.round(scrimAlpha));
         canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
         scrimPaint.setAlpha(0x99);
@@ -407,10 +432,11 @@ final class TaskSwitcherView extends View {
             morphClipPath.addRoundRect(card, corner, corner, Path.Direction.CW);
             canvas.clipPath(morphClipPath);
             // 内容按抽屉坐标排版，这里缩放进正在形变的矩形，于是"窄条长成卡片"是连续的
-            float scaleX = drawerWidth > 0f ? card.width() / drawerWidth : 1f;
-            float scaleY = drawerHeight > 0f ? card.height() / drawerHeight : 1f;
+            // 等比：只按宽度的比例缩放，横竖同倍。非等比缩放会把字形横向压到纵向的
+            // 41%（sx 0.463 / sy 1.117），任何文字都会变成"被拉伸的贴图"。
+            float contentScale = drawerWidth > 0f ? card.width() / drawerWidth : 1f;
             canvas.translate(card.left, card.top);
-            canvas.scale(scaleX, scaleY);
+            canvas.scale(contentScale, contentScale);
             canvas.translate(-drawerLeft, -drawerTop);
         }
         int contentLayer = contentAlpha < 1f
