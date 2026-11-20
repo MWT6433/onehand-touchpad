@@ -84,6 +84,20 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
      */
     private static final TimeInterpolator SWITCHER_OPEN_EASE =
             new PathInterpolator(0.15f, 0.40f, 0.35f, 1.00f);
+    /**
+     * 方案 B：把动画时钟往前挪 16ms —— 首帧一出来就带着速度，用来替代 H1 触感盖空窗。
+     * 代价是首帧直接跳一截：m 0→0.163，卡片宽 49→155px（约 30dp）。
+     * 不做 setCurrentPlayTime：那依赖「start() 之后第一帧之前」的调用时序，不可靠；
+     * 前移写进曲线本身，首帧一定生效。把它改成 0 就退回原曲线（唯一开关）。
+     */
+    private static final long SWITCHER_HEAD_START_MS = 16L;
+    private static final TimeInterpolator SWITCHER_OPEN_HEAD_START = new TimeInterpolator() {
+        @Override
+        public float getInterpolation(float input) {
+            float shifted = input + SWITCHER_HEAD_START_MS / (float) RETRACT_DURATION_MS;
+            return SWITCHER_OPEN_EASE.getInterpolation(shifted > 1f ? 1f : shifted);
+        }
+    };
     private static final String TAG = "OHTP";
     private static volatile String runtimeState = "未运行";
 
@@ -1137,7 +1151,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             // 看门狗在动画中途把窗口摘掉（真机 show=0 reason=watchdog）。
             scheduleSwitcherCloseWatchdog(duration + 250L);
         }
-        animator.setInterpolator(closing ? RETRACT_EASE : SWITCHER_OPEN_EASE);
+        // 弹出走带前移的包装曲线（内部委托 SWITCHER_OPEN_EASE，不另起一条曲线）。
+        animator.setInterpolator(closing ? RETRACT_EASE : SWITCHER_OPEN_HEAD_START);
         if (!closing) {
             switcherSettleTicked = false;
         }
