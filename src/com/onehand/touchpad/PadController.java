@@ -1587,8 +1587,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             long doubleTapDt = Math.max(0L, eventTime - lastHandleTapUpTime);
             lastHandleTapUpTime = 0L;
             log.info("HANDLE_TAP", "kind=double_tap dt=" + doubleTapDt);
-            // 先振再开窗：窗口 attach + 首绘要 22–48ms，触感先到，用户会觉得操作已被接收。
-            haptics.tick(Haptics.REASON_DRAWER_OPEN);
+            // 2026-11-20 用户要求先去掉这第一拍（原用于盖住窗口 attach 的 22–48ms 空窗），
+            // 对比手感后决定是否恢复。REASON_DRAWER_OPEN 的定义保留，恢复只需加回一行。
             showTaskSwitcher();
             return;
         }
