@@ -158,6 +158,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private WindowManager.LayoutParams quickMenuParams;
     private WindowManager.LayoutParams taskSwitcherParams;
     private ValueAnimator taskSwitcherMorphAnimator;
+    /** 本次展开是否已经报过"落定"触感（每次展开只报一次）。 */
+    private boolean switcherSettleTicked;
     private Runnable taskSwitcherCloseWatchdog;
     private ViewTreeObserver.OnDrawListener switcherFirstDrawListener;
     private boolean switcherFirstDrawDone;
@@ -1136,11 +1138,20 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             scheduleSwitcherCloseWatchdog(duration + 250L);
         }
         animator.setInterpolator(closing ? RETRACT_EASE : SWITCHER_OPEN_EASE);
+        if (!closing) {
+            switcherSettleTicked = false;
+        }
         animator.addUpdateListener(a -> {
             if (taskSwitcherView == null) {
                 return;
             }
-            taskSwitcherView.setMorph((float) a.getAnimatedValue());
+            float value = (float) a.getAnimatedValue();
+            taskSwitcherView.setMorph(value);
+            // 落定触感：四边首次 ≥0.97（约第 24 帧）。和第一行的过冲峰值落在同一拍上。
+            if (!closing && !switcherSettleTicked && value >= 0.97f) {
+                switcherSettleTicked = true;
+                haptics.tick(Haptics.REASON_DRAWER_SETTLE);
+            }
         });
         animator.addListener(new AnimatorListenerAdapter() {
             @Override
@@ -1171,6 +1182,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     @Override
     public void onTaskSelected(int taskId) {
+        haptics.tick(Haptics.REASON_TASK_LAUNCH);
         ShizukuInjector shizukuInjector = shizukuInjector();
         boolean ok = false;
         String reason = "no_shizuku";
@@ -1214,6 +1226,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     @Override
     public boolean onTaskRemoveRequested(int taskId) {
+        haptics.tick(Haptics.REASON_TASK_REMOVE);
         ShizukuInjector shizukuInjector = shizukuInjector();
         boolean ok = false;
         String reason = "no_shizuku";
@@ -1574,6 +1587,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             long doubleTapDt = Math.max(0L, eventTime - lastHandleTapUpTime);
             lastHandleTapUpTime = 0L;
             log.info("HANDLE_TAP", "kind=double_tap dt=" + doubleTapDt);
+            // 先振再开窗：窗口 attach + 首绘要 22–48ms，触感先到，用户会觉得操作已被接收。
+            haptics.tick(Haptics.REASON_DRAWER_OPEN);
             showTaskSwitcher();
             return;
         }

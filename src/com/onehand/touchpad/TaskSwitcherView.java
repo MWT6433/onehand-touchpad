@@ -17,6 +17,8 @@ import android.graphics.drawable.Drawable;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.animation.TimeInterpolator;
+import android.view.animation.PathInterpolator;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -79,10 +81,28 @@ final class TaskSwitcherView extends View {
      */
     private static final float MORPH_CONTENT_START = 0.45f;
     private static final float MORPH_CONTENT_FULL = 0.75f;
-    /** 行错峰：第 i 行从 MORPH_CONTENT_START + i*STAGGER 开始，WINDOW 内淡入并上浮。 */
-    private static final float MORPH_ROW_STAGGER = 0.06f;
-    private static final float MORPH_ROW_WINDOW = 0.30f;
-    private static final float ROW_RISE_DP = 6f;
+    /**
+     * 行错峰（Opus 规格）：第 i 行在 117+24i ms 起步（m≈0.74+0.055i），
+     * 上浮 8dp 用带回弹的曲线（峰值过冲约 0.8dp），alpha 只在前 60ms 线性拉起。
+     * 第 3 行正好在 260ms 收尾，和第 1 行的过冲峰值落在落定触感那一拍上。
+     */
+    private static final float MORPH_ROW_FIRST = 0.74f;
+    private static final float MORPH_ROW_STAGGER = 0.055f;
+    private static final float MORPH_ROW_WINDOW = 0.22f;
+    private static final float MORPH_ROW_ALPHA_WINDOW = 0.14f;
+    private static final float ROW_RISE_DP = 8f;
+    /** 回弹曲线：控制点 1.56 > 1，故意越过终点再落下。 */
+    private static final TimeInterpolator ROW_RISE_EASE =
+            new PathInterpolator(0.34f, 1.56f, 0.64f, 1f);
+    /** 按下：70ms 压下去；松开 180ms 弹回（也带过冲）。 */
+    private static final TimeInterpolator PRESS_IN_EASE =
+            new PathInterpolator(0.20f, 0f, 0f, 1f);
+    private static final TimeInterpolator PRESS_OUT_EASE =
+            new PathInterpolator(0.30f, 1.5f, 0.60f, 1f);
+    private static final float PRESS_SCALE = 0.03f;
+    private static final int PRESS_OVERLAY_ALPHA = 0x0F;
+    private static final long PRESS_IN_MS = 70L;
+    private static final long PRESS_OUT_MS = 180L;
     private static final float MORPH_SCRIM_FULL = 0.55f;
     private static final int TASK_CLOSE_MARK_DP = 7;
     private static final int TITLE_TOP_DP = 7;
@@ -135,6 +155,11 @@ final class TaskSwitcherView extends View {
     // 初值必须是 0（= 手柄形态）：万一首帧在任何配置之前发生，也只能画成横条。
     private float morph = 0f;
     private long probeT0 = 0L;
+    private float pressAmount = 0f;
+    private int pressRow = -1;
+    private boolean pressOnClose = false;
+    private android.animation.ValueAnimator pressAnimator;
+    private final Paint pressPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     /** 形变起点（手柄矩形），由控制器在开窗时写入。 */
     private final RectF handleRect = new RectF();
     private final RectF morphRect = new RectF();
@@ -236,6 +261,7 @@ final class TaskSwitcherView extends View {
         innerStrokePaint.setStrokeWidth(innerStrokeWidth);
         innerStrokePaint.setColor(INNER_STROKE_COLOR);
         rowPaint.setStyle(Paint.Style.FILL);
+        pressPaint.setStyle(Paint.Style.FILL);
         closeCirclePaint.setStyle(Paint.Style.STROKE);
         closeCirclePaint.setStrokeWidth(dp(TASK_CLOSE_STROKE_DP));
         rowTintPaint.setStyle(Paint.Style.FILL);
@@ -400,7 +426,9 @@ final class TaskSwitcherView extends View {
                     + " sx=" + String.format(java.util.Locale.US, "%.3f", sx)
                     + " sy=" + String.format(java.util.Locale.US, "%.3f", sy)
                     + " re=" + String.format(java.util.Locale.US, "%.2f,%.2f,%.2f",
-                            rowEase(0), rowEase(1), rowEase(2)));
+                            rowAlpha(0), rowAlpha(1), rowAlpha(2))
+                    + " rr=" + String.format(java.util.Locale.US, "%.3f,%.3f,%.3f",
+                            rowRise(0), rowRise(1), rowRise(2)));
         }
         scrimPaint.setAlpha(Math.round(scrimAlpha));
         canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
@@ -494,10 +522,23 @@ final class TaskSwitcherView extends View {
                 drawerTop + dp(TITLE_TOP_DP) - titleMetrics.ascent, titlePaint);
     }
 
-    /** 第 index 行的出场进度：0 = 未开始，1 = 到位。收起时按同一窗口反向返回。 */
-    private float rowEase(int index) {
-        float start = MORPH_CONTENT_START + index * MORPH_ROW_STAGGER;
-        return smoothstep(start, start + MORPH_ROW_WINDOW, morph);
+    private static float clamp01(float value) {
+        return value < 0f ? 0f : (value > 1f ? 1f : value);
+    }
+
+    private float rowStart(int index) {
+        return MORPH_ROW_FIRST + index * MORPH_ROW_STAGGER;
+    }
+
+    /** 行 alpha：前 MORPH_ROW_ALPHA_WINDOW 线性拉起（约 60ms）。 */
+    private float rowAlpha(int index) {
+        return clamp01((morph - rowStart(index)) / MORPH_ROW_ALPHA_WINDOW);
+    }
+
+    /** 行上浮：带回弹，过冲时返回值 > 1（行会越过终点再落回）。 */
+    private float rowRise(int index) {
+        return ROW_RISE_EASE.getInterpolation(
+                clamp01((morph - rowStart(index)) / MORPH_ROW_WINDOW));
     }
 
     private void drawRows(Canvas canvas) {
@@ -528,14 +569,24 @@ final class TaskSwitcherView extends View {
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
                     currentTop + rowHeight);
-            // 错峰：本行自己的 alpha 层 + 从下方 6dp 浮到位。整行一起动（含分割线与 ×），
-            // 否则行框先到位、文字后到，会看出两层壳。
-            float rowEase = rowEase(index);
-            int rowLayer = rowEase < 0.999f
-                    ? canvas.saveLayerAlpha(null, Math.round(255f * rowEase), Canvas.ALL_SAVE_FLAG)
+            // 错峰：本行自己的 alpha 层 + 从下方 8dp 带回弹浮到位。整行一起动
+            // （含分割线与 ×），否则行框先到位、文字后到，会看出两层壳。
+            float rowAlpha = rowAlpha(index);
+            float rowRise = rowRise(index);
+            int rowLayer = rowAlpha < 0.999f
+                    ? canvas.saveLayerAlpha(null, Math.round(255f * rowAlpha), Canvas.ALL_SAVE_FLAG)
                     : -1;
             int rowSave = canvas.save();
-            canvas.translate(0f, dp(ROW_RISE_DP) * (1f - rowEase));
+            canvas.translate(0f, dp(ROW_RISE_DP) * (1f - rowRise));
+            // 按下态：整行绕中心缩到 0.97 并叠一层 6% 白，松手带回弹复原。
+            float press = index == pressRow ? pressAmount : 0f;
+            if (press > 0.001f) {
+                float shrink = 1f - PRESS_SCALE * press;
+                canvas.scale(shrink, shrink, rowRect.centerX(), rowRect.centerY());
+                pressPaint.setColor(Color.WHITE);
+                pressPaint.setAlpha(Math.round(PRESS_OVERLAY_ALPHA * press));
+                canvas.drawRoundRect(rowRect, rowCorner, rowCorner, pressPaint);
+            }
             boolean foreground = isForeground(task);
             // 方向二：细分割线；与当前行相邻的那条让开，避免 T 形接头。
             if (index > 0 && !foreground && !isForeground(tasks.get(index - 1))) {
@@ -831,6 +882,51 @@ final class TaskSwitcherView extends View {
         this.openedAtUptime = SystemClock.uptimeMillis();
     }
 
+    /** 返回 (x,y) 落在第几行，-1 表示不在任何行内。 */
+    private int rowIndexAt(float x, float y) {
+        if (x < drawerLeft + dp(DRAWER_PADDING_DP)
+                || x > drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP)) {
+            return -1;
+        }
+        float currentTop = drawerTop + rowsTop;
+        for (int index = 0; index < tasks.size(); index++) {
+            if (y >= currentTop && y <= currentTop + rowHeight) {
+                return index;
+            }
+            currentTop += rowHeight + dp(ROW_GAP_DP);
+        }
+        return -1;
+    }
+
+    private void animatePress(float target) {
+        if (pressAnimator != null) {
+            pressAnimator.cancel();
+            pressAnimator = null;
+        }
+        final boolean pressing = target > pressAmount;
+        android.animation.ValueAnimator animator =
+                android.animation.ValueAnimator.ofFloat(pressAmount, target);
+        animator.setDuration(pressing ? PRESS_IN_MS : PRESS_OUT_MS);
+        animator.setInterpolator(pressing ? PRESS_IN_EASE : PRESS_OUT_EASE);
+        animator.addUpdateListener(a -> {
+            pressAmount = (float) a.getAnimatedValue();
+            invalidate();
+        });
+        animator.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator a) {
+                if (target <= 0f) {
+                    pressRow = -1;
+                    pressOnClose = false;
+                    pressAmount = 0f;
+                    invalidate();
+                }
+            }
+        });
+        pressAnimator = animator;
+        animator.start();
+    }
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         // 两道闸：① 打开抽屉那一手的残余事件（downTime 早于开窗）；
@@ -849,10 +945,24 @@ final class TaskSwitcherView extends View {
                 activePointerId = event.getPointerId(0);
                 touchDownX = event.getX(0);
                 touchDownY = event.getY(0);
+                // 按下当帧就有回应：先滑出 slop 会整个取消（按了不算，才敢反复按着玩）。
+                pressRow = rowIndexAt(touchDownX, touchDownY);
+                pressOnClose = pressRow >= 0 && closeTaskAt(touchDownX, touchDownY) != null;
+                if (pressRow >= 0) {
+                    animatePress(1f);
+                }
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                if (pressRow >= 0 && Math.hypot(event.getX(0) - touchDownX,
+                        event.getY(0) - touchDownY) > touchSlop) {
+                    animatePress(0f);
+                }
                 return true;
             case MotionEvent.ACTION_UP:
+                animatePress(0f);
                 return finishTap(event);
             case MotionEvent.ACTION_CANCEL:
+                animatePress(0f);
                 activePointerId = MotionEvent.INVALID_POINTER_ID;
                 return true;
             default:
