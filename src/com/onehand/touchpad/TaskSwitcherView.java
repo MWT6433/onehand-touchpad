@@ -154,7 +154,6 @@ final class TaskSwitcherView extends View {
     /** 打开/收起形变进度：0 = 手柄矩形，1 = 抽屉矩形。 */
     // 初值必须是 0（= 手柄形态）：万一首帧在任何配置之前发生，也只能画成横条。
     private float morph = 0f;
-    private long probeT0 = 0L;
     private float pressAmount = 0f;
     private int pressRow = -1;
     private boolean pressOnClose = false;
@@ -410,26 +409,6 @@ final class TaskSwitcherView extends View {
         // 原来 smoothstep(0,0.90)：内容全亮时遮罩才 46%，前段背景几乎不动。
         // 现在线性映射到 0.55 铺满——起步立即变暗，且比卡片先收住。
         float scrimAlpha = 0x99 * Math.min(1f, Math.max(0f, morph / MORPH_SCRIM_FULL));
-        if (probeT0 == 0L) {
-            probeT0 = android.os.SystemClock.uptimeMillis();
-        }
-        {
-            float sx = drawerWidth > 0f ? card.width() / drawerWidth : 0f;
-            float sy = drawerHeight > 0f ? card.height() / drawerHeight : 0f;
-            android.util.Log.i("OHTP", "FRAME t=" + (android.os.SystemClock.uptimeMillis() - probeT0)
-                    + " m=" + String.format(java.util.Locale.US, "%.4f", morph)
-                    + " card=" + String.format(java.util.Locale.US, "%.1f,%.1f,%.1f,%.1f",
-                            card.left, card.top, card.right, card.bottom)
-                    + " corner=" + String.format(java.util.Locale.US, "%.1f", corner)
-                    + " ca=" + String.format(java.util.Locale.US, "%.1f", contentAlpha)
-                    + " sa=" + String.format(java.util.Locale.US, "%.1f", scrimAlpha)
-                    + " sx=" + String.format(java.util.Locale.US, "%.3f", sx)
-                    + " sy=" + String.format(java.util.Locale.US, "%.3f", sy)
-                    + " re=" + String.format(java.util.Locale.US, "%.2f,%.2f,%.2f",
-                            rowAlpha(0), rowAlpha(1), rowAlpha(2))
-                    + " rr=" + String.format(java.util.Locale.US, "%.3f,%.3f,%.3f",
-                            rowRise(0), rowRise(1), rowRise(2)));
-        }
         scrimPaint.setAlpha(Math.round(scrimAlpha));
         canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
         scrimPaint.setAlpha(0x99);
