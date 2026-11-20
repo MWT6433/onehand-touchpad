@@ -78,6 +78,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final float RETRACT_CONTENT_FADE_END = 0.45f;
     private static final TimeInterpolator RETRACT_EASE =
             new PathInterpolator(0.65f, 0f, 0.15f, 1f);
+    /** 抽屉弹出：开头快、结尾慢；起手有冲劲，落地不用硬停。 */
+    private static final TimeInterpolator SWITCHER_OPEN_EASE =
+            new PathInterpolator(0.10f, 0.45f, 0.50f, 0.85f);
     private static final String TAG = "OHTP";
     private static volatile String runtimeState = "未运行";
 
@@ -1129,7 +1132,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             // 看门狗在动画中途把窗口摘掉（真机 show=0 reason=watchdog）。
             scheduleSwitcherCloseWatchdog(duration + 250L);
         }
-        animator.setInterpolator(RETRACT_EASE);
+        animator.setInterpolator(closing ? RETRACT_EASE : SWITCHER_OPEN_EASE);
         animator.addUpdateListener(a -> {
             if (taskSwitcherView == null) {
                 return;
