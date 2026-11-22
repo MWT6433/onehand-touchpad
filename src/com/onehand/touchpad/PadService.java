@@ -54,7 +54,6 @@ public final class PadService extends AccessibilityService {
     private PadController controller;
     private boolean shizukuListenersRegistered;
     private boolean replaceInjectorOnReconnect;
-    private boolean handleSuppressed;
     private final Object foregroundLock = new Object();
     private final ArrayDeque<ForegroundApp> recentForegroundApps = new ArrayDeque<>();
     private String lastForegroundPackage;
@@ -386,6 +385,16 @@ public final class PadService extends AccessibilityService {
         }
     }
 
+    /** P77：拖动尺寸条时把最新 dp 目标交给现役控制器，不重建窗口。 */
+    static void animateHandleSize(int widthDp, int heightDp) {
+        PadService service = instance;
+        PadController controller = service == null ? null : service.controller;
+        if (controller == null) {
+            return;
+        }
+        controller.requestHandleSizeDp(widthDp, heightDp);
+    }
+
     static boolean reloadController() {
         PadService service = instance;
         if (service == null) {
@@ -415,12 +424,6 @@ public final class PadService extends AccessibilityService {
         if (service != null) {
             service.mainHandler.post(service::recoverShizukuChannel);
         }
-    }
-
-    static void setHandleSuppressed(boolean suppressed) {
-        PadService service = instance;
-        if (service != null) service.mainHandler.post(
-                () -> service.controllerSetHandleSuppressed(suppressed));
     }
 
     static void requestStart(Context context) {
@@ -594,38 +597,39 @@ public final class PadService extends AccessibilityService {
             }
         }
         logInjectorRelease(fromReload ? "reload" : "switch", releaseOk);
-        if (controller != null) {
-            controller.destroy();
-            controller = null;
-        }
+        PadController previousController = controller;
+        controller = null;
         Injector nextInjector = useShizuku
                 ? new ShizukuInjector(this)
                 : new GestureInjector(this);
         injector = nextInjector;
         startController();
+        handOffController(previousController);
     }
 
     private void restartController(Injector activeInjector) {
         activeInjector.abortLongPressDrag();
-        if (controller != null) {
-            controller.destroy();
-            controller = null;
-        }
+        PadController previous = controller;
+        controller = null;
         startController();
+        handOffController(previous);
+    }
+
+    /** P51：新控制器已经挂好窗口，等它画出第一帧再拆旧的（见 destroyAfterFirstDraw）。 */
+    private void handOffController(PadController previous) {
+        if (previous == null) {
+            return;
+        }
+        if (controller == null) {
+            previous.destroy();
+            return;
+        }
+        controller.destroyAfterFirstDraw(previous);
     }
 
     private void startController() {
         controller = new PadController(this, injector);
         controller.start();
-        controller.setHandleSuppressed(handleSuppressed);
-    }
-
-    private void controllerSetHandleSuppressed(boolean suppressed) {
-        handleSuppressed = suppressed;
-        PadController activeController = controller;
-        if (activeController != null) {
-            activeController.setHandleSuppressed(suppressed);
-        }
     }
 
     private void logChannel(String from, String to, String reason) {

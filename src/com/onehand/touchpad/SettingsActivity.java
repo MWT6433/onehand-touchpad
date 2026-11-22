@@ -48,6 +48,9 @@ import rikka.shizuku.Shizuku;
 
 public final class SettingsActivity extends Activity {
     private static final String DEV_SIDE_EXTRA = "dev_side";
+    private static final String DEV_RETRACT_EXTRA = "dev_retract";
+    private static final String DEV_KB_GAP_EXTRA = "dev_kbgap";
+    private static final String DEV_CURSOR_CURVE_EXTRA = "dev_cursorcurve";
     // P45：这两个是 @hide 常量，公开 SDK 不导出，按 AOSP 取值写成字面量
     private static final String ACTION_A11Y_DETAILS = "android.settings.ACCESSIBILITY_DETAILS_SETTINGS";
     private static final String EXTRA_A11Y_COMPONENT = "android.provider.extra.COMPONENT_NAME";
@@ -67,6 +70,7 @@ public final class SettingsActivity extends Activity {
     private static final int PANEL_SCALE_PROGRESS_STEP = 1;
     private static final int STATUS_POLL_MS = 1000;
     private static final long DRAWER_ANIMATION_MS = 200L;
+    private static final long TOUCH_PAD_PREVIEW_HOLD_MS = 1500L;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ProbeTargetView rootView;
@@ -88,6 +92,8 @@ public final class SettingsActivity extends Activity {
     private TextView handleHeightValueText;
     private SeekBar handleWidthSeekBar;
     private SeekBar handleHeightSeekBar;
+    private TextView touchPadWidthValueText;
+    private SeekBar touchPadWidthSeekBar;
     private Button handleSideLeftButton;
     private Button handleSideRightButton;
     private boolean updatingHandleHeightSeekBar;
@@ -144,6 +150,11 @@ public final class SettingsActivity extends Activity {
         }
     };
 
+    private final Runnable touchPadPreviewHide = () -> {
+        Prefs.setDebugTouchPadVisible(SettingsActivity.this, false);
+        PadService.reloadController();
+    };
+
     private final Shizuku.OnRequestPermissionResultListener permissionResultListener =
             (requestCode, grantResult) -> {
                 if (requestCode != ShizukuClient.PERMISSION_REQUEST_CODE) {
@@ -187,6 +198,9 @@ public final class SettingsActivity extends Activity {
         settingsPrefs.onShizukuFirstAuthorized();
         Debug.refresh(this);
         applyDevSideIntent(getIntent());
+        applyDevRetractIntent(getIntent());
+        applyDevKbGapIntent(getIntent());
+        applyDevCursorCurveIntent(getIntent());
         rootView = new ProbeTargetView(this);
         rootView.setBackgroundColor(COLOR_BACKGROUND);
         rootView.setFitsSystemWindows(true);
@@ -208,6 +222,9 @@ public final class SettingsActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         applyDevSideIntent(intent);
+        applyDevRetractIntent(intent);
+        applyDevKbGapIntent(intent);
+        applyDevCursorCurveIntent(intent);
     }
 
     @Override
@@ -222,7 +239,6 @@ public final class SettingsActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        PadService.setHandleSuppressed(true);
         resumed = true;
         mainHandler.removeCallbacks(statusRefreshRunnable);
         refreshStatus();
@@ -233,7 +249,6 @@ public final class SettingsActivity extends Activity {
     protected void onPause() {
         resumed = false;
         mainHandler.removeCallbacks(statusRefreshRunnable);
-        PadService.setHandleSuppressed(false);
         super.onPause();
     }
 
@@ -247,6 +262,7 @@ public final class SettingsActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        mainHandler.removeCallbacks(touchPadPreviewHide);
         mainHandler.removeCallbacksAndMessages(null);
         try {
             Shizuku.removeRequestPermissionResultListener(permissionResultListener);
@@ -516,18 +532,20 @@ public final class SettingsActivity extends Activity {
                 handleWidthValueText.setText(String.valueOf(widthDp));
                 handleWidthSeekBar.setStateDescription(widthDp + " dp");
                 settingsPrefs.setHandleWDp(widthDp);
-                PadService.reloadController();
+                // P77：立即保存并投递最新目标；控制器从当前可见尺寸连续过渡。
+                PadService.animateHandleSize(widthDp, settingsPrefs.getHandleHDp());
             }
 
             @Override
             public void onStartTrackingTouch(SeekBar seekBar) {
-                // Persistence and live reload are immediate while dragging.
+                // Persistence and visual preview are immediate while dragging.
             }
 
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
                 ProbeLog.get().info("HANDLE_WIDTH_DP",
                         "value=" + settingsPrefs.getHandleWDp());
+                // P77：动画与触摸窗口已随进度同步；松手只保留诊断日志，不 reload。
             }
         });
         seekParams = matchHeight(dp(20));
@@ -569,18 +587,20 @@ public final class SettingsActivity extends Activity {
                 handleHeightValueText.setText(String.valueOf(heightDp));
                 handleHeightSeekBar.setStateDescription(heightDp + " dp");
                 settingsPrefs.setHandleHDp(heightDp);
-                PadService.reloadController();
+                // P77：立即保存并投递最新目标；控制器从当前可见尺寸连续过渡。
+                PadService.animateHandleSize(settingsPrefs.getHandleWDp(), heightDp);
             }
 
             @Override
             public void onStartTrackingTouch(SeekBar seekBar) {
-                // Persistence and live reload are immediate while dragging.
+                // Persistence and visual preview are immediate while dragging.
             }
 
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
                 ProbeLog.get().info("HANDLE_HEIGHT_DP",
                         "value=" + settingsPrefs.getHandleHDp());
+                // P77：动画与触摸窗口已随进度同步；松手只保留诊断日志，不 reload。
             }
         });
         seekParams = matchHeight(dp(20));
@@ -1231,6 +1251,8 @@ public final class SettingsActivity extends Activity {
         longPressHint = null;
         longPressDragCheckBox = null;
         gestureExclusionSwitch = null;
+        touchPadWidthValueText = null;
+        touchPadWidthSeekBar = null;
         // 注意：Shizuku 行现在在主页，不随抽屉重建——这里不能把它的引用置空，
         // 否则 refreshShizukuControls() 之后再也更新不到那一行（P80 真机踩过）。
 
@@ -1308,6 +1330,9 @@ public final class SettingsActivity extends Activity {
         LinearLayout.LayoutParams resetGuideParams = matchHeight(dp(40));
         resetGuideParams.topMargin = dp(6);
         debugDrawerContent.addView(resetGuideButton, resetGuideParams);
+
+        addRowDivider(debugDrawerContent);
+        buildTouchPadWidthRow(debugDrawerContent);
 
         if (!Debug.enabled()) {
             TextView prompt = createText("开启调试模式后可查看探针与日志", 13f, COLOR_MUTED, false);
@@ -1433,6 +1458,72 @@ public final class SettingsActivity extends Activity {
         debugDrawerContent.addView(footer, footerParams);
     }
 
+    private void buildTouchPadWidthRow(LinearLayout content) {
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.HORIZONTAL);
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        TextView label = createText("触摸区宽度", 14f, COLOR_TEXT, false);
+        heading.addView(label, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        int initialDp = Prefs.handleTouchPadDp(this);
+        touchPadWidthValueText = createText(initialDp + " dp", 13f, COLOR_MUTED, false);
+        // P65：matchWrap() 名字是 wrap、宽度其实是 MATCH_PARENT，放在水平 LinearLayout 里
+        // 会把权重 1 的标签压成 0 宽（真机表现为只剩 "24 dp"、标签整行不渲染）。
+        // 这里必须用真正的 WRAP_CONTENT。
+        heading.addView(touchPadWidthValueText, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams headingParams = matchHeight(dp(32));
+        headingParams.topMargin = dp(8);
+        content.addView(heading, headingParams);
+
+        touchPadWidthSeekBar = new SeekBar(this);
+        touchPadWidthSeekBar.setId(View.generateViewId());
+        configureSeekBar(touchPadWidthSeekBar);
+        touchPadWidthSeekBar.setMin(Prefs.HANDLE_TOUCH_PAD_MIN);
+        touchPadWidthSeekBar.setMax(Prefs.HANDLE_TOUCH_PAD_MAX);
+        touchPadWidthSeekBar.setProgress(initialDp);
+        touchPadWidthSeekBar.setStateDescription(initialDp + " dp");
+        touchPadWidthSeekBar.setContentDescription("触摸区宽度，范围 "
+                + Prefs.HANDLE_TOUCH_PAD_MIN + " 到 "
+                + Prefs.HANDLE_TOUCH_PAD_MAX + " dp，步进 1 dp");
+        label.setLabelFor(touchPadWidthSeekBar.getId());
+        touchPadWidthSeekBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(
+                            SeekBar seekBar, int progress, boolean fromUser) {
+                        if (uiSyncInProgress) return;
+                        int widthDp = Math.max(Prefs.HANDLE_TOUCH_PAD_MIN,
+                                Math.min(Prefs.HANDLE_TOUCH_PAD_MAX, progress));
+                        touchPadWidthValueText.setText(widthDp + " dp");
+                        touchPadWidthSeekBar.setStateDescription(widthDp + " dp");
+                        Prefs.setHandleTouchPadDp(SettingsActivity.this, widthDp);
+                        PadService.reloadController();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(SeekBar seekBar) {
+                        // P76：开始拖动即显示触摸区（原来要单独开“显示触摸区”开关）。
+                        mainHandler.removeCallbacks(touchPadPreviewHide);
+                        Prefs.setDebugTouchPadVisible(SettingsActivity.this, true);
+                        PadService.reloadController();
+                    }
+
+                    @Override
+                    public void onStopTrackingTouch(SeekBar seekBar) {
+                        ProbeLog.get().info("TOUCH_PAD_WIDTH_DP",
+                                "value=" + Prefs.handleTouchPadDp(SettingsActivity.this));
+                        // P76：松手后停留一会儿再收起，让用户看清最终宽度。
+                        mainHandler.removeCallbacks(touchPadPreviewHide);
+                        mainHandler.postDelayed(
+                                touchPadPreviewHide, TOUCH_PAD_PREVIEW_HOLD_MS);
+                    }
+                });
+        LinearLayout.LayoutParams seekParams = matchHeight(dp(28));
+        seekParams.bottomMargin = dp(5);
+        content.addView(touchPadWidthSeekBar, seekParams);
+    }
+
     private void toggleDebugMode() {
         boolean enabled = !settingsPrefs.getDebugMode();
         settingsPrefs.setDebugMode(enabled);
@@ -1503,6 +1594,69 @@ public final class SettingsActivity extends Activity {
         if (Prefs.SIDE_LEFT.equals(requestedSide) || Prefs.SIDE_RIGHT.equals(requestedSide)) {
             setSideAndReload(requestedSide);
         }
+    }
+
+    private void applyDevRetractIntent(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        String requested = intent.getStringExtra(DEV_RETRACT_EXTRA);
+        if (requested == null) {
+            return;
+        }
+        final int variant;
+        try {
+            variant = Integer.parseInt(requested);
+        } catch (NumberFormatException ignored) {
+            return;
+        }
+        if (variant < 0 || variant > 3) {
+            return;
+        }
+        settingsPrefs.setRetractVariant(variant);
+        ProbeLog.get().info("RETRACT_VARIANT", "variant=" + variant);
+    }
+
+    private void applyDevKbGapIntent(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        String requested = intent.getStringExtra(DEV_KB_GAP_EXTRA);
+        if (requested == null) {
+            return;
+        }
+        final int variant;
+        try {
+            variant = Integer.parseInt(requested);
+        } catch (NumberFormatException ignored) {
+            return;
+        }
+        if (variant < 0 || variant > 3) {
+            return;
+        }
+        settingsPrefs.setKbGapVariant(variant);
+        ProbeLog.get().info("KB_GAP", "variant=" + variant);
+    }
+
+    private void applyDevCursorCurveIntent(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        String requested = intent.getStringExtra(DEV_CURSOR_CURVE_EXTRA);
+        if (requested == null) {
+            return;
+        }
+        final int variant;
+        try {
+            variant = Integer.parseInt(requested);
+        } catch (NumberFormatException ignored) {
+            return;
+        }
+        if (variant < 0 || variant > 3) {
+            return;
+        }
+        settingsPrefs.setCursorCurveVariant(variant);
+        ProbeLog.get().info("CURSOR_CURVE", "variant=" + variant);
     }
 
     private boolean setSideAndReload(String side) {
@@ -1862,6 +2016,12 @@ public final class SettingsActivity extends Activity {
                 if (gestureExclusionSwitch.isChecked() != exclusion) {
                     gestureExclusionSwitch.setChecked(exclusion);
                 }
+            }
+            if (touchPadWidthSeekBar != null) {
+                int touchPadWidth = Prefs.handleTouchPadDp(this);
+                syncGauge(touchPadWidthSeekBar, touchPadWidthValueText,
+                        touchPadWidth, touchPadWidth + " dp",
+                        touchPadWidth + " dp");
             }
             boolean shizuku = Prefs.INJECT_CHANNEL_SHIZUKU.equals(
                     settingsPrefs.getInjectChannel());

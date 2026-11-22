@@ -8,6 +8,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
@@ -31,6 +32,8 @@ final class PanelView extends View {
     private static final int MODE_HANDLE = 0;
     private static final int MODE_PANEL = 1;
     private static final String[] ARROW_DIRECTIONS = {"left", "right", "down", "up"};
+    /** P59：速度估计的一阶低通时间常数。25ms ≈ 单帧尖峰只透 27%，稳态几乎无影响。 */
+    private static final double SPEED_FILTER_TAU_MS = 25.0;
 
     // P49：面板灰面再加深、透明度再降低，箭头不再依赖黑块或圆形底。
     static final float HAIRLINE_DP = 0.35f;
@@ -56,9 +59,13 @@ final class PanelView extends View {
     private Listener listener;
     private VelocityTracker velocityTracker;
     private int activePointerId = MotionEvent.INVALID_POINTER_ID;
+    private float vxSmooth = -1f;
+    private float vySmooth = -1f;
+    private long speedSmoothAt;
     private int mode = MODE_HANDLE;
     private boolean touchIgnored;
     private boolean mirrored;
+    private boolean debugTouchPadVisible;
     /** 手柄触摸识别余量（窗口比竖条宽出来的部分），朝屏幕内侧那一侧留白。 */
     private float handleTouchPad;
     /**
@@ -68,8 +75,14 @@ final class PanelView extends View {
     private boolean touchOnly;
     private boolean adjustMode;
     private float contentAlpha = 1.0f;
+    private float lastLoggedAlpha = 1f;
     private float collapseW = -1f;
     private float collapseH = -1f;
+    /**
+     * 折叠面在窗口内的横向内缩（px）。收回动画期间窗口已经对准手柄位，
+     * 靠这个量把折叠面"反补"回面板该在的屏幕位置，避免收尾时再挪窗口（P50）。
+     */
+    private float collapseInsetX;
 
     private float density;
     private float handleWidth;
@@ -123,6 +136,18 @@ final class PanelView extends View {
                 Prefs.ARROW_CHEVRON_STROKE_DP * density * scale * CHEVRON_HALO_MULT);
     }
 
+    /** P77：控制器是唯一尺寸插值源；本 View 只接受当前帧的绘制尺寸。 */
+    void setHandleSize(float width, float height) {
+        float nextWidth = Math.max(1f, width);
+        float nextHeight = Math.max(1f, height);
+        if (handleWidth == nextWidth && handleHeight == nextHeight) {
+            return;
+        }
+        handleWidth = nextWidth;
+        handleHeight = nextHeight;
+        invalidate();
+    }
+
     void setTouchOnly(boolean touchOnly) {
         this.touchOnly = touchOnly;
         // 纯触摸层不该在无障碍树里多出一个节点。
@@ -134,6 +159,11 @@ final class PanelView extends View {
 
     void setHandleTouchPad(float handleTouchPad) {
         this.handleTouchPad = Math.max(0f, handleTouchPad);
+    }
+
+    void setDebugTouchPadVisible(boolean visible) {
+        debugTouchPadVisible = visible;
+        invalidate();
     }
 
     void setMirrored(boolean mirrored) {
@@ -166,6 +196,15 @@ final class PanelView extends View {
     void clearCollapseRect() {
         collapseW = -1f;
         collapseH = -1f;
+        collapseInsetX = 0f;
+        invalidate();
+    }
+
+    void setCollapseInset(float insetX) {
+        if (collapseInsetX == insetX) {
+            return;
+        }
+        collapseInsetX = insetX;
         invalidate();
     }
 
@@ -206,11 +245,22 @@ final class PanelView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
+        // P68 诊断：只在 alpha 真的变化时打，避免每帧刷屏。
+        float viewAlpha = getAlpha();
+        if (Math.abs(viewAlpha - lastLoggedAlpha) > 0.01f) {
+            lastLoggedAlpha = viewAlpha;
+            ProbeLog.get().info("PANEL_ALPHA",
+                    "alpha=" + viewAlpha + " mode=" + (mode == MODE_HANDLE ? "handle" : "panel")
+                    + " touchOnly=" + (touchOnly ? 1 : 0));
+        }
         if (touchOnly) {
             return;
         }
         if (mode == MODE_HANDLE) {
             drawHandle(canvas);
+            if (debugTouchPadVisible) {
+                drawDebugTouchPad(canvas);
+            }
         } else {
             drawPanel(canvas, contentAlpha);
         }
@@ -237,13 +287,37 @@ final class PanelView extends View {
         drawDoubleHairline(canvas, drawingRect, radius, 1f);
     }
 
+    private void drawDebugTouchPad(Canvas canvas) {
+        float height = Math.min(getHeight(), handleHeight);
+        float windowWidth = getWidth();
+        if (windowWidth <= 0f || height <= 0f) {
+            return;
+        }
+        // P76：标出**整个**可触摸范围（含竖条本身），不再只画竖条外侧的余量。
+        // 之前只画余量，用户看到的红色宽度 ≈ handleTouchPad，误以为竖条不属于触摸区。
+        fillPaint.setColor(Color.argb(60, 255, 0, 0));
+        canvas.drawRect(0f, 0f, windowWidth, height, fillPaint);
+        // 描边标出边界：填充叠在半透明竖条上颜色偏暗，加一圈亮红更容易读数。
+        Paint.Style previousStrokeStyle = strokePaint.getStyle();
+        strokePaint.setStyle(Paint.Style.STROKE);
+        strokePaint.setStrokeWidth(Math.max(1f, dp(1.5f)));
+        strokePaint.setColor(Color.argb(200, 255, 80, 80));
+        canvas.drawRect(0f, 0f, windowWidth, height, strokePaint);
+        strokePaint.setStyle(previousStrokeStyle);
+    }
+
     private void drawPanel(Canvas canvas, float alpha) {
         float w = collapseW > 0f ? Math.min(collapseW, panelWidth) : panelWidth;
-        float h = collapseH > 0f ? Math.min(collapseH, panelHeight) : panelHeight;
-        float left = mirrored ? panelWidth - w : 0f;
+        // P53：折叠面的高度上限必须跟着手柄走。手柄长度可以大于面板主体高（滑杆到 160dp），
+        // 旧写法把 h 钳在 panelHeight ⇒ 高度在收回动画里全程不动，收尾 clearCollapseRect()
+        // 之后 drawHandle 用真实 handleHeight，一帧内从 463 跳到 476（136dp 时 Δ=13px，
+        // 160dp 时 Δ=97px），真机表现为「尾部突然变长」。
+        final float hMax = Math.max(panelHeight, handleHeight);
+        float h = collapseH > 0f ? Math.min(collapseH, hMax) : panelHeight;
+        float left = (mirrored ? panelWidth - w : 0f) + collapseInsetX;
         float radius = Math.min(cornerRadius, Math.min(w, h) / 2f);
         float contentBottom = h;
-        if (collapseH < 0f || collapseH >= panelHeight - 0.5f) {
+        if (collapseH < 0f || collapseH >= hMax - 0.5f) {
             contentBottom = panelHeight + gap + arrowBarHeight;
         }
         canvas.save();
@@ -268,7 +342,7 @@ final class PanelView extends View {
         canvas.drawRoundRect(drawingRect, radius, radius, fillPaint);
         drawDoubleHairline(canvas, drawingRect, radius, alpha + (1f - alpha) * collapse);
 
-        if (collapseH < 0f || collapseH >= panelHeight - 0.5f) {
+        if (collapseH < 0f || collapseH >= hMax - 0.5f) {
             float capsuleTop = panelHeight + gap;
             drawingRect.set(left, capsuleTop, left + w, capsuleTop + arrowBarHeight);
             float capsuleRadius = Math.min(arrowBarHeight, w) / 2f;
@@ -394,6 +468,7 @@ final class PanelView extends View {
             } else {
                 velocityTracker.clear();
             }
+            resetSpeedFilter();
             velocityTracker.addMovement(event);
             return true;
         }
@@ -444,7 +519,32 @@ final class PanelView extends View {
         }
         float vx = velocityTracker.getXVelocity(activePointerId);
         float vy = velocityTracker.getYVelocity(activePointerId);
-        return (float) Math.hypot(vx, vy);
+        // P59：两轴各自一阶低通后再取 max —— 削掉单轴的单帧尖峰（手指微抖），
+        // 但「斜向按快的那一轴、不放大到 1.41 倍」这个原版语义完全保留。
+        // 滤波结果写回同名变量，返回语句与 p41 的锚点保持一致。
+        final long now = SystemClock.uptimeMillis();
+        if (vxSmooth < 0f) {
+            // 新手势首帧直通：否则第一帧会被低估约 73%，慢移起步更肉
+            vxSmooth = Math.abs(vx);
+            vySmooth = Math.abs(vy);
+        } else {
+            final long dt = Math.max(1L, now - speedSmoothAt);
+            final float a = (float) (1.0 - Math.exp(-dt / SPEED_FILTER_TAU_MS));
+            vxSmooth += a * (Math.abs(vx) - vxSmooth);
+            vySmooth += a * (Math.abs(vy) - vySmooth);
+        }
+        speedSmoothAt = now;
+        vx = vxSmooth;
+        vy = vySmooth;
+        // 原版用 max(|vx|, |vy|)：快的那一轴带动两轴，斜着划也不会炸到两倍。
+        return Math.max(Math.abs(vx), Math.abs(vy));
+    }
+
+    /** P59：新手势/抬手时清掉滤波状态，避免上一次甩动的速度带进下一次慢移。 */
+    private void resetSpeedFilter() {
+        vxSmooth = -1f;
+        vySmooth = -1f;
+        speedSmoothAt = 0L;
     }
 
     private void releaseVelocityTracker() {
@@ -453,6 +553,7 @@ final class PanelView extends View {
             velocityTracker = null;
         }
         activePointerId = MotionEvent.INVALID_POINTER_ID;
+        resetSpeedFilter();
     }
 
     @Override

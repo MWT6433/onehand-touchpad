@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.os.IBinder;
 import android.os.Process;
 import android.os.SystemClock;
+import android.view.InputDevice;
 import android.view.InputEvent;
 import android.view.MotionEvent;
 
@@ -72,6 +73,11 @@ public final class ShizukuInjectionService extends IInjectionApi.Stub {
         try {
             event = MotionEvent.obtain(
                     safeDownTime, safeEventTime, action, x, y, 0);
+            // P62：6 参 obtain 的默认 source 是 SOURCE_UNKNOWN，而真实触摸是 SOURCE_TOUCHSCREEN。
+            // 来源未知时 InputDispatcher 无法按触摸语义归类，严格 App 可忽略或标记异常。
+            event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+            // 刻意保留 deviceId=0：冒认真实触摸屏 id 可能与抬起后的真实手指交叠，
+            // 使 InputDispatcher 视作两个活跃设备并触发 ACTION_CANCEL。
             Object result = selected.method.invoke(
                     selected.receiver, event, asyncInputMode());
             return !(result instanceof Boolean) || (Boolean) result;

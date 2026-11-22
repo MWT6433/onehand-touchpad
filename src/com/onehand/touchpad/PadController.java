@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 OneHand Touchpad contributors
+// P73：抽屉打开时手柄 alpha 延后到遮罩铺满后再压下；冻结值同步更新。
+// P74：撤销 P69/P70/P73 的跨窗口 alpha-only 交接与阈值抑制，恢复 eec56e2 的同消息 alpha 交换；冻结值同步更新。
+// P75：删除挂窗前的提前抑制，让手柄保留到首帧交接；冻结值同步更新。
+// P77：手柄尺寸配置改由控制器单源插值并同步绘制、停靠几何与触摸窗口；冻结值同步更新。
+// P90：方向按钮改按光标与当前面板的上缘/内侧边实时相对位置判定；冻结值同步更新。
 package com.onehand.touchpad;
 
 import android.animation.Animator;
@@ -21,6 +26,7 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewTreeObserver;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.view.animation.PathInterpolator;
 
 import java.util.Collections;
@@ -42,12 +48,19 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final int WINDOW_TYPE_APPLICATION_OVERLAY =
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
     private static final int HANDLE_EDGE_MARGIN_DP = 8;
+    private static final long HANDLE_SIZE_ANIM_MS = 140L;
+    private static final TimeInterpolator HANDLE_SIZE_EASE = new DecelerateInterpolator();
     // 手柄的触摸识别余量：手指落在竖条边缘、或略偏内侧一点时，仍然算点在
     // 手柄上（原来窗口宽度正好等于竖条，右缘一过就不派发事件，双击老是失败）。
     // 这笔余量是"吞掉的"，系统返回手势区域也随之扩大，1 个常量可调。
-    // 手柄的触摸/排除余量。系统的排除区只能覆盖窗口自己的可触摸矩形，所以这个余量
-    // 同时也是"从竖条内侧被屏蔽多宽"：24dp 让整条 40dp 以上的边缘带子都归触控板。
-    private static final int HANDLE_TOUCH_PAD_DP = 24;
+    // 手柄触摸/排除余量默认 24dp，可由调试抽屉调整；系统排除区只能覆盖窗口自己的
+    // 可触摸矩形，所以余量同时也是"从竖条内侧被屏蔽多宽"。
+    /**
+     * P56：键盘弹起时手柄只保留 8dp 识别余量。24dp 那层余量是隐形的，会吃掉键盘上方
+     * composer 一行按钮的触摸（真机：Hermes console 发送按钮点不动）。8dp 保留最短的
+     * 边缘手势屏蔽带，用户明确选择这一档。
+     */
+    private static final int HANDLE_TOUCH_PAD_IME_DP = 8;
     /** 抽屉挂上时的 alpha：不用 0，避免任何"零 alpha 不绘制"的优化把首帧回调吞掉。 */
     private static final float SWITCHER_ATTACH_ALPHA = 0.01f;
 
@@ -58,6 +71,48 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final float PULL_TRIGGER_MM = 6.0f;
     private static final int CURSOR_TOP_Y_DP = 125;
     private static final int CURSOR_GAP_DP = 48;
+    /**
+     * 拉出瞬间的光标起点：改为原版 sidegesturepad 9.3.13.0 的 w.j() 算法。
+     *
+     * <p>原版不用 dp，全部以英寸为单位（1 英寸 = xdpi 像素），所以换机型手感一致。
+     * 原先 P28 那套「顶部 125dp / 内侧 48dp」的屏幕绝对口径仍然保留在
+     * setPullCursorPosition() 里——置 false 即回退，不用改别的。
+     */
+    private static final boolean CURSOR_INIT_OHO = true;
+    /** 往上拖：指针落在手指上方 2.5 英寸。 */
+    private static final float CURSOR_INIT_UP_INCH = 2.5f;
+    /** 往下拖：指针落在手指外侧 1.2 英寸（平板 2.0，本机按手机走）。 */
+    private static final float CURSOR_INIT_SIDE_INCH = 1.2f;
+    /** 原版用「1 英寸」做右边界与左侧钳制的单位。 */
+    private static final float CURSOR_INIT_MIN_INCH = 1.0f;
+    /**
+     * 原版 move_area 的尺寸（dimen touch_assist_move_area = 135dp）。
+     *
+     * <p>它在全屏的 controller 容器里是 layout_gravity=center，所以它的 rect.top
+     * 恒等于 (屏高 − 135dp)/2；j() 上拉分支的锚点正是这个值，不是手指。
+     * 3088 高 → 1308，再减 2.5 英寸(1252) = 55。
+     */
+    private static final int CURSOR_INIT_MOVE_AREA_DP = 135;
+
+    /** 原版：速度低于 30px/s 固定 1.5 倍。 */
+    private static final float CURSOR_GAIN_SLOW_PX = 30f;
+    private static final double CURSOR_GAIN_SLOW_K = 1.5;
+    /** 原版手机 ln(v)/2、平板 ln(v)/1.5。 */
+    private static final double CURSOR_GAIN_LOG_DIVISOR = 2.0;
+    /** P58：平滑时间常数随速度段变化 —— 慢移强降噪，快移保持跟手。
+     *  用 capped（≈d，与 sensitivity 无关）分档，不用 velocity（它本身在抖）。 */
+    private static final double GAIN_TAU_SLOW_MS = 160.0;   // capped ≤ 2.0
+    private static final double GAIN_TAU_FAST_MS = 50.0;    // capped ≥ 4.0
+    private static final double GAIN_TAU_SLOW_D = 2.0;
+    private static final double GAIN_TAU_FAST_D = 4.0;
+    /** P55：慢端增益削减三档，index 0 = 现状（不读这两个数组）。 */
+    private static final double[] CURSOR_ADAPT_MAX_CUT = { 0.0, 0.60, 0.90, 1.30 };
+    /** ln(vFade/30)：档1 vFade=1500 ⇒ 3.912023；档2 2000 ⇒ 4.199705；档3 2500 ⇒ 4.422849。 */
+    private static final double[] CURSOR_ADAPT_FADE_LOG = { 0.0, 3.912023, 4.199705, 4.422849 };
+    /** d 的下限，防止削减后为负。 */
+    private static final double CURSOR_ADAPT_MIN_D = 0.15;
+    /** 原版横向夹边允许越出 指针宽/3；指针宽 = 2×半径，所以是 2/3 半径。 */
+    private static final float CURSOR_EDGE_OVERSHOOT_RATIO = 2f / 3f;
     private static final int CURSOR_UP_DEADBAND_DP = 4;
     private static final int MENU_ROW_STEP_DP = 48;
     private static final int MENU_ROW_HYST_DP = 24;
@@ -74,10 +129,28 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final long PANEL_FOLLOW_OUTSIDE_GUARD_MS = 64L;
     private static final float ECHO_RADIUS_DP = 24f;
     private static final long ECHO_LOG_INTERVAL_MS = 100L;
+    /** P51：换左右手时竖条横移的时长。比收回短——那是一次「换手」不是「收起」。 */
+    private static final long SIDE_SHIFT_DURATION_MS = 180L;
+    private static final TimeInterpolator SIDE_SHIFT_EASE =
+            new PathInterpolator(0.65f, 0f, 0.15f, 1f);
+    /** P51：新控制器等第一帧的兜底时限，超时就按老办法同步拆旧窗口。 */
+    private static final long HANDOFF_DESTROY_TIMEOUT_MS = 400L;
+    /** 抽屉开合仍保持原 260ms，不随 P52 的收回动画档位变化。 */
+    private static final long SWITCHER_OPEN_DURATION_MS = 260L;
     private static final long RETRACT_DURATION_MS = 260L;
     private static final float RETRACT_CONTENT_FADE_END = 0.45f;
     private static final TimeInterpolator RETRACT_EASE =
             new PathInterpolator(0.65f, 0f, 0.15f, 1f);
+    private static final TimeInterpolator RETRACT_LIVELY_EASE =
+            new PathInterpolator(0.25f, 0.70f, 0.20f, 1.00f);
+    private static final TimeInterpolator RETRACT_SWEEP_EASE =
+            new PathInterpolator(0.15f, 0.90f, 0.30f, 1.00f);
+    private static final TimeInterpolator RETRACT_BOUNCE_EASE =
+            new PathInterpolator(0.30f, 0.95f, 0.30f, 1.06f);
+    private static final long[] RETRACT_DURATION_BY_VARIANT =
+            { RETRACT_DURATION_MS, 200L, 210L, 220L };
+    private static final float[] RETRACT_FADE_BY_VARIANT =
+            { RETRACT_CONTENT_FADE_END, 0.55f, 0.60f, 0.55f };
     /**
      * 抽屉弹出：快起、收尾斜率归零（四段位移 56/28/13/3，起步斜率 2.67）。
      * 旧曲线收尾斜率 0.31，最后一帧仍以约 6.8px/帧在动然后硬停，缺落定过程。
@@ -94,7 +167,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final TimeInterpolator SWITCHER_OPEN_HEAD_START = new TimeInterpolator() {
         @Override
         public float getInterpolation(float input) {
-            float shifted = input + SWITCHER_HEAD_START_MS / (float) RETRACT_DURATION_MS;
+            float shifted = input
+                    + SWITCHER_HEAD_START_MS / (float) SWITCHER_OPEN_DURATION_MS;
             return SWITCHER_OPEN_EASE.getInterpolation(shifted > 1f ? 1f : shifted);
         }
     };
@@ -123,8 +197,14 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private final float panelScale;
     private final int edgeInset;
     private final int handleTouchPad;
-    private final int handleWidth;
-    private final int handleHeight;
+    /**
+     * P77：手柄尺寸是控制器内唯一的当前帧来源。绘制、停靠 x、普通触摸层和单击小窗
+     * 都只读这两个字段；动画目标另存，忙态时不会被提前消费。
+     */
+    private int handleWidth;
+    private int handleHeight;
+    private int targetHandleWidth;
+    private int targetHandleHeight;
     private final int panelWidth;
     private final int panelHeight;
     private final int arrowBarHeight;
@@ -148,6 +228,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private static final TimeInterpolator KEYBOARD_RESTORE_EASE =
             new PathInterpolator(0.35f, 0f, 0.18f, 1f);
     private static final int KEYBOARD_LIFT_GAP_DP = 8;
+    /** P54：键盘避让间距四档。档 0 = P54 之前的 8dp。 */
+    private static final int[] KEYBOARD_LIFT_GAP_BY_VARIANT = { 8, 20, 32, 44 };
+    /** P56：默认 32dp；与 Prefs.KB_GAP_DEFAULT_VARIANT 共用同一取值来源。 */
+    private static final int KEYBOARD_LIFT_GAP_DEFAULT_VARIANT =
+            Prefs.KB_GAP_DEFAULT_VARIANT;
     private boolean imeVisible;
     private int imeTopPx = -1;
     private int imeSavedY = -1;
@@ -162,6 +247,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private final float pullTriggerPx;
     private final float echoRadiusPx;
     private final float cursorRadius;
+    /** 原版的尺寸单位：1 英寸 = xdpi 像素（不是 density 换算出来的 160dpi）。 */
+    private final float xdpiPx;
     private final float outwardOffset;
     private String side;   // P53：切换左右手改为原地生效，不再重建控制器
     private final boolean clickModeWindow;
@@ -212,6 +299,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private boolean gestureMoved;
     private boolean gestureExceededSlop;
     private long gestureDownTime;
+    private float gainSmooth = -1f;
+    private long gainSmoothAt;
     private float gestureDownX;
     private float gestureDownY;
     private float gestureDownRawX;
@@ -263,6 +352,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     /** 已上报给系统的排除尺寸，避免每帧都往 ViewRootImpl 里写。 */
     private int gestureExclusionWidth = -1;
     private int gestureExclusionHeight = -1;
+    private int gestureExclusionLayerWidth = -1;
+    private int gestureExclusionLayerHeight = -1;
     private long lastCursorLogTime;
     private long lastPulledLogTime;
     private long lastLayoutUpdateTime;
@@ -281,7 +372,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private int retractStartX;
     private int retractStartY;
+    private ValueAnimator handleSizeAnimator;
     private ValueAnimator retractAnimator;
+    private ValueAnimator sideShiftAnimator;
     private String sideSwitchTarget;
     private String sideSwitchActionSide;
 
@@ -330,7 +423,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         DisplayMetrics displayMetrics = context.getResources().getDisplayMetrics();
         this.density = displayMetrics.density;
         this.edgeInset = dp(HANDLE_EDGE_MARGIN_DP);
-        this.handleTouchPad = dp(HANDLE_TOUCH_PAD_DP);
+        this.handleTouchPad = dp(Prefs.handleTouchPadDp(context));
         this.followSlopPx = FOLLOW_SLOP_MM * displayMetrics.xdpi / 25.4f;
         this.pullTriggerPx = PULL_TRIGGER_MM * displayMetrics.xdpi / 25.4f;
         this.echoRadiusPx = ECHO_RADIUS_DP * displayMetrics.density;
@@ -364,8 +457,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                     + " availableH=" + availableHeight);
         }
         int requested = dp(prefs.getHandleHDp());
-        int maxDrawable = Math.max(dp(24), windowHeight - dp(8));
-        handleHeight = Math.min(requested, maxDrawable);
+        handleHeight = clampHandleHeight(requested);
+        targetHandleWidth = handleWidth;
+        targetHandleHeight = handleHeight;
         if (handleHeight != requested) {
             Log.i(TAG, "HANDLE_H_CLAMP requested=" + requested + " effective=" + handleHeight
                     + " windowH=" + windowHeight);
@@ -383,6 +477,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         doubleTapSlop = viewConfiguration.getScaledDoubleTapSlop();
         doubleTapTimeout = ViewConfiguration.getDoubleTapTimeout();
         cursorRadius = dp(Prefs.CURSOR_R_DP);
+        float xdpi = context.getResources().getDisplayMetrics().xdpi;
+        xdpiPx = xdpi > 0f ? xdpi : density * 160f;
         outwardOffset = dp(Prefs.CURSOR_OUTWARD_OFFSET_DP);
 
         panelView = new PanelView(context);
@@ -406,6 +502,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         log.info("SIDE", "side=" + side + " settledX=" + settledX
                 + " windowW=" + windowWidth + " handleW=" + handleWidth);
         panelView.setHandleTouchPad(handleTouchPad);
+        panelView.setDebugTouchPadVisible(Prefs.debugTouchPadVisible(context));
         panelView.setHandleMode();
         panelParams = createPanelParams();
         panelParams.width = windowWidth;
@@ -430,27 +527,175 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             logWindowFrame(panelView, "panel");
             if (handleSuppressed) {
                 setHandleSuppressed(true);
+            } else {
+                applyPendingHandleSizeIfSafe();
             }
         }
     }
 
+    /** P77：设置页每个进度都投递最新目标；忙态只记住，恢复停靠后再消费。 */
+    void requestHandleSizeDp(int widthDp, int heightDp) {
+        int widthPx = dp(widthDp);
+        int requestedHeightPx = dp(heightDp);
+        int heightPx = clampHandleHeight(requestedHeightPx);
+        if (heightPx != requestedHeightPx) {
+            log.info("HANDLE_H_CLAMP", "requested=" + requestedHeightPx
+                    + " effective=" + heightPx + " windowH=" + windowHeight
+                    + " target=1");
+        }
+        targetHandleWidth = widthPx;
+        targetHandleHeight = heightPx;
+        cancelHandleSizeAnimator();
+        log.info("HANDLE_SIZE", "request w=" + widthPx + " h=" + heightPx
+                + " state=" + state + " attached=" + (panelAttached ? 1 : 0)
+                + " gesture=" + (panelGestureActive ? 1 : 0)
+                + " switcher=" + ((taskSwitcherOpen || taskSwitcherAttached) ? 1 : 0)
+                + " suppressed=" + (handleSuppressed ? 1 : 0));
+        applyPendingHandleSizeIfSafe();
+    }
+
+    private boolean canChangeHandleSizeNow() {
+        return started
+                && panelAttached
+                && panelParams != null
+                && state == State.SETTLED
+                && !panelGestureActive
+                && !taskSwitcherOpen
+                && !taskSwitcherAttached
+                && !handleSuppressed
+                && retractAnimator == null
+                && sideShiftAnimator == null
+                && imeAnimator == null
+                && !sideShiftPostPending;
+    }
+
+    private void applyPendingHandleSizeIfSafe() {
+        if (handleSizeAnimator != null || !canChangeHandleSizeNow()) {
+            return;
+        }
+        final int toWidth = targetHandleWidth;
+        final int toHeight = targetHandleHeight;
+        if (toWidth == handleWidth && toHeight == handleHeight) {
+            return;
+        }
+        final int fromWidth = handleWidth;
+        final int fromHeight = handleHeight;
+        ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
+        animator.setDuration(HANDLE_SIZE_ANIM_MS);
+        animator.setInterpolator(HANDLE_SIZE_EASE);
+        animator.addUpdateListener(animation -> {
+            if (handleSizeAnimator != animation) {
+                return;
+            }
+            if (!canChangeHandleSizeNow()) {
+                cancelHandleSizeAnimator();
+                return;
+            }
+            float fraction = (float) animation.getAnimatedValue();
+            applyHandleSizeFrame(
+                    Math.round(fromWidth + (toWidth - fromWidth) * fraction),
+                    Math.round(fromHeight + (toHeight - fromHeight) * fraction));
+        });
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (handleSizeAnimator != animation) {
+                    return;
+                }
+                handleSizeAnimator = null;
+                applyHandleSizeFrame(toWidth, toHeight);
+                log.info("HANDLE_SIZE_END", "w=" + handleWidth + " h=" + handleHeight
+                        + " targetW=" + targetHandleWidth + " targetH=" + targetHandleHeight);
+            }
+        });
+        handleSizeAnimator = animator;
+        log.info("HANDLE_SIZE_START", "fromW=" + fromWidth + " fromH=" + fromHeight
+                + " toW=" + toWidth + " toH=" + toHeight);
+        animator.start();
+    }
+
+    /**
+     * 当前帧唯一提交点：先改绘制源，再用同一组宽高重算停靠/双击矩形、普通触摸层
+     * 或单击小窗，最后走既有的唯一窗口提交路径。
+     */
+    private void applyHandleSizeFrame(int width, int height) {
+        if (!canChangeHandleSizeNow()
+                || (width == handleWidth && height == handleHeight)) {
+            return;
+        }
+        handleWidth = width;
+        handleHeight = height;
+        panelView.setHandleSize(handleWidth, handleHeight);
+        if (handleLayerView != null) {
+            handleLayerView.setHandleSize(handleWidth, handleHeight);
+        }
+        settledX = settledXForSide();
+        settledY = yPercentToPixels(prefs.getYPercent());
+        if (imeSavedY >= 0) {
+            imeSavedY = settledY;
+        }
+        if (imeVisible && imeTopPx > 0) {
+            int keyboardGap = dp(kbLiftGapDp());
+            if (settledY + handleHeight > imeTopPx - keyboardGap) {
+                settledY = Math.max(keyboardGap,
+                        imeTopPx - handleHeight - keyboardGap);
+            }
+        }
+        if (clickModeWindow) {
+            applyClickModeHandleGeometry(panelParams);
+        } else {
+            applyHandleWindowGeometry();
+            panelParams.y = settledY;
+            syncHandleLayerLayout();
+        }
+        log.trace("HANDLE_SIZE_FRAME", "w=" + handleWidth + " h=" + handleHeight
+                + " settledX=" + settledX + " y=" + settledY
+                + " click=" + (clickModeWindow ? 1 : 0));
+        updatePanelLayoutImmediate();
+    }
+
+    private void cancelHandleSizeAnimator() {
+        ValueAnimator animator = handleSizeAnimator;
+        if (animator == null) {
+            return;
+        }
+        handleSizeAnimator = null;
+        animator.cancel();
+    }
+
     void setHandleSuppressed(boolean suppressed) {
+        log.info("HANDLE_SUPPRESS",
+                "want=" + (suppressed ? 1 : 0)
+                + " state=" + state
+                + " started=" + (started ? 1 : 0)
+                + " attached=" + (panelAttached ? 1 : 0)
+                + " t=" + SystemClock.uptimeMillis());
         handleSuppressed = suppressed;
         if (!started || !panelAttached || panelParams == null || state != State.SETTLED) {
             return;
         }
         // 用 view alpha 而不是 setVisibility(INVISIBLE)：窗口里画好的手柄不会丢，恢复是瞬时的
         // （没有重绘延迟）。
+        log.info("HANDLE_SUPPRESS_APPLY",
+                "alpha=" + (handleSuppressed ? 0f : 1f)
+                + " panelAttached=" + (panelAttached ? 1 : 0)
+                + " layerAttached=" + (handleLayerAttached ? 1 : 0)
+                + " t=" + SystemClock.uptimeMillis());
         panelView.setAlpha(handleSuppressed ? 0f : 1f);
         if (handleLayerAttached) {
             handleLayerView.setAlpha(handleSuppressed ? 0f : 1f);
         }
         syncWindowTouchable();
         performPanelLayoutUpdate(SystemClock.uptimeMillis());
+        if (!handleSuppressed) {
+            applyPendingHandleSizeIfSafe();
+        }
     }
 
     void destroy() {
+        cancelHandleSizeAnimator();
         cancelRetractAnimator();
+        cancelSideShiftAnimator();
         removeQuickMenu("destroy");
         hideTaskSwitcher("destroy");
         panelView.setAdjustMode(false);
@@ -604,11 +849,16 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         int x = handleLayerX();
         int y = panelParams.y;
-        if (handleLayerParams.x == x && handleLayerParams.y == y) {
+        int w = handleLayerWidth();
+        int h = handleHeight;
+        if (handleLayerParams.x == x && handleLayerParams.y == y
+                && handleLayerParams.width == w && handleLayerParams.height == h) {
             return;
         }
         handleLayerParams.x = x;
         handleLayerParams.y = y;
+        handleLayerParams.width = w;
+        handleLayerParams.height = h;
         handleLayerDirty = true;
     }
 
@@ -639,12 +889,20 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     /** 触摸层宽度 = 屏幕边缘 → 竖条内侧 + 识别余量（两侧对称处理）。 */
     private int handleLayerWidth() {
+        final int touchPad = handleTouchPadNow();
         float barLeftInWindow = panelView.handleLeftInWindow(windowWidth);
         float barWidth = Math.min(windowWidth, handleWidth);
         float screenBarLeft = panelParams.x + barLeftInWindow;
         return Math.round(isLeftEdge()
-                ? screenBarLeft + barWidth + handleTouchPad
-                : screenWidth - screenBarLeft + handleTouchPad);
+                ? screenBarLeft + barWidth + touchPad
+                : screenWidth - screenBarLeft + touchPad);
+    }
+
+    private int handleTouchPadNow() {
+        // 键盘期永远不超过 8dp，但用户把常态调得更小时也不会反而变宽。
+        return imeVisible
+                ? Math.min(handleTouchPad, dp(HANDLE_TOUCH_PAD_IME_DP))
+                : handleTouchPad;
     }
 
     private boolean applyTouchable(WindowManager.LayoutParams params, boolean touchable) {
@@ -715,12 +973,17 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         // 单击模式这扇小窗既是手柄本体、也是排除区的载体：横向同样要从屏幕边缘一直铺到
         // "竖条内侧 + 余量"（竖条自身仍留在 HANDLE_EDGE_MARGIN_DP 那个视觉位置上，
         // 那么多出来的外侧留白算在窗口里）。见 handleLayerX() 的注释。
+        applyClickModeHandleGeometry(params);
+        return params;
+    }
+
+    /** 单击小窗与普通手柄触摸层共用同一套宽高来源；这里是其唯一参数写法。 */
+    private void applyClickModeHandleGeometry(WindowManager.LayoutParams params) {
         int width = Math.round(edgeInset + handleWidth + handleTouchPad);
         params.width = width;
         params.height = handleHeight;
         params.x = isLeftEdge() ? 0 : Math.max(0, screenWidth - width);
         params.y = settledY;
-        return params;
     }
 
     private WindowManager.LayoutParams createCursorParams() {
@@ -925,6 +1188,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         nextView.setListener(this);
         nextView.setOpeningTime(gestureDownTime);
+        // P75：这里不要抑制手柄。抽屉挂上时只有 SWITCHER_ATTACH_ALPHA(0.01) 透明，
+        // 若此刻就把手柄 alpha 压成 0，两边都不可见 ⇒ 真机纯白背景下实测 1~2 帧全空
+        // （cover=0.000）。正确的交接点在 startSwitcherAfterHandoff：那里"抽屉 alpha=1 +
+        // 手柄 alpha=0"在同一条消息里完成，合成器只会看到一份横条。
 
         taskSwitcherView = nextView;
         // 几何与形变起点必须在窗口挂上之前写好。
@@ -1009,6 +1276,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     private void detachTaskSwitcher(String reason) {
+        log.info("SWITCHER_DETACH",
+                "reason=" + reason
+                + " state=" + state
+                + " viewNull=" + (taskSwitcherView == null ? 1 : 0)
+                + " t=" + SystemClock.uptimeMillis());
         cancelSwitcherCloseWatchdog();
         TaskSwitcherView removed = taskSwitcherView;
         if (!switcherHandoffDone) {
@@ -1017,10 +1289,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             detachSwitcherFirstDrawListener(removed);
         }
         // 收尾交接：同一条消息里把底层手柄显回来、把抽屉透明掉，然后才摘窗。
-        // 两者都是 view alpha，同一帧生效：
-        //   - 不会"抽屉没了、手柄还没画"（漏一帧发亮）；
-        //   - 也不会"抽屉的横条盖在手柄上"（45% + 45% = 70%，就是收尾后那一下变深）。
-        // 摘窗排到下一条消息：此时抽屉已经全透明，摘不摘都看不出来，不必再赌时序。
         setHandleSuppressed(false);
         if (taskSwitcherAttached && removed != null) {
             taskSwitcherView = null;
@@ -1040,6 +1308,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         taskSwitcherAttached = false;
         taskSwitcherOpen = false;
+        // 抽屉解除抑制且两扇窗口都退出竞争后再消费拖动期间保留的最新尺寸目标。
+        applyPendingHandleSizeIfSafe();
+        log.info("SWITCHER_DETACH_DONE",
+                "removedAlpha=" + (removed == null ? -1f : removed.getAlpha())
+                + " t=" + SystemClock.uptimeMillis());
         log.info("TASK_SWITCHER", "show=0 reason=" + reason);
     }
 
@@ -1062,7 +1335,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     /**
      * 抽屉 ↔ 底层手柄的交接：抽屉先以透明状态挂上并画出首帧，然后在同一条消息里
-     * 把抽屉的 alpha 升到 1、把底层手柄的 alpha 降到 0，最后才启动形变动画。
+     * 把抽屉的 alpha 升到 1、把底层手柄切到只抑制触摸，最后才启动形变动画。
+     * P73 打开方向的手柄 alpha 留到 morph 越过遮罩全满阈值后再压到 0。
      *
      * 两根横条都是 45% 黑，交接只有三种可能：
      *   · 两层同时可见 → 合成 ~70% 黑（"变深一下"）；
@@ -1143,7 +1417,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             taskSwitcherMorphAnimator = null;
         }
         final boolean closing = to < from;
-        final long duration = RETRACT_DURATION_MS;
+        final long duration = SWITCHER_OPEN_DURATION_MS;
         ValueAnimator animator = ValueAnimator.ofFloat(from, to);
         animator.setDuration(duration);
         if (closing) {
@@ -1321,10 +1595,31 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         String from = state.name();
         state = next;
         runtimeState = state.name();
+        if (state != State.SETTLED) {
+            cancelHandleSizeAnimator();
+        }
+        boolean sideShiftPosted = false;
+        if (next == State.SETTLED && pendingSideSwitch != null && !clickModeWindow) {
+            final String pending = pendingSideSwitch;
+            pendingSideSwitch = null;
+            sideShiftPosted = true;
+            sideShiftPostPending = true;
+            // 停靠几何落定后再补，避免和收回动画抢同一帧的 layoutParams。
+            mainHandler.post(() -> {
+                sideShiftPostPending = false;
+                if (state == State.SETTLED && !clickModeWindow) {
+                    applySideInPlace(pending);
+                }
+                applyPendingHandleSizeIfSafe();
+            });
+        }
         log.info("STATE", "from=" + from + " to=" + next.name());
         syncWindowTouchable();
         if (state == State.SETTLED) {
             setHandleSuppressed(handleSuppressed);
+            if (!sideShiftPosted) {
+                applyPendingHandleSizeIfSafe();
+            }
         } else if (panelAttached) {
             performPanelLayoutUpdate(SystemClock.uptimeMillis());
         }
@@ -1343,6 +1638,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (state != State.SETTLED && state != State.ACTIVE) {
             return false;
         }
+        // 新触摸接管几何；目标仍保留，等手势结束回到安全停靠态再续播。
+        cancelHandleSizeAnimator();
         if (state == State.SETTLED) {
             panelView.clearCollapseRect();
             panelView.setContentAlpha(1f);
@@ -1358,6 +1655,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         longPressTriggered = false;
         lpdEnabledForGesture = prefs.getLongPressDrag();
         gestureDownTime = eventTime;
+        gainSmooth = -1f;
         gestureDownX = rawX;
         gestureDownY = rawY;
         gestureDownRawX = rawX;
@@ -1501,6 +1799,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             }
             panelGestureActive = false;
             injectionSuppressedForGesture = false;
+            applyPendingHandleSizeIfSafe();
             return true;
         }
         if (state == State.PULLING) {
@@ -1641,6 +1940,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             updatePanelLayout(true);
             transitionTo(State.SETTLED);
         }
+        applyPendingHandleSizeIfSafe();
     }
 
     @Override
@@ -1689,6 +1989,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (state != State.ACTIVE) {
             return;
         }
+        String from = currentToggleSideFromCursorPosition();
+        if (from == null) {
+            return;
+        }
         mainHandler.removeCallbacks(longPressRunnable);
         if (lpdActive) {
             abortLongPressDrag("cursor_toggle", false);
@@ -1701,7 +2005,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         injectionSuppressedForGesture = false;
         activeDownArrow = null;
 
-        String from = currentEffectiveCursorSide();
         String to = Prefs.CURSOR_SIDE_TOP.equals(from)
                 ? Prefs.CURSOR_SIDE_LEFT : Prefs.CURSOR_SIDE_TOP;
         prefs.setCursorSide(to);
@@ -1790,19 +2093,25 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         panelView.setPanelMode();
         panelView.clearCollapseRect();
         panelView.setContentAlpha(1f);
-        int panelWindowX = panelParams.x;
-        int panelWindowY = panelParams.y;
         float maximumY = Math.max(0, screenHeight - windowHeight);
-        panelParams.x = Math.round(clamp(
+        // 逻辑 pop 坐标（手指居中）只用于快捷菜单触发与光标初始化。
+        int popX = Math.round(clamp(
                 rawX - windowWidth / 2f, minPanelX(), maxPanelX()));
-        panelParams.y = Math.round(clamp(
+        int popY = Math.round(clamp(
                 rawY - windowHeight / 2f, 0f, maximumY));
+        if (!clickMode) {
+            // P42：单击模式的窗口就是那根竖条本身，而 transitionTo(PULLING) 会立刻布局、
+            // 且不会在恢复之后再布局一次——写进去就等于把竖条拖到手指下（真机实测
+            // 右手柄 x 1279→1023、左手柄 y 1698→1437）。全功能模式才需要面板就位。
+            panelParams.x = popX;
+            panelParams.y = popY;
+        }
         pullPopRawX = rawX;
         pullPopRawY = rawY;
         pullLastRawX = rawX;
         pullLastRawY = rawY;
-        pullPopPanelX = panelParams.x;
-        pullPopPanelY = panelParams.y;
+        pullPopPanelX = popX;
+        pullPopPanelY = popY;
         if (!clickMode) {
             // 不做节流/延迟提交：一帧内直接铺满，避免逐帧放大被看成"弹出动画"
             performPanelLayoutUpdate(SystemClock.uptimeMillis());
@@ -1817,8 +2126,6 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             transitionTo(State.PULLING);
             ensurePullCursorShown(dx, dy);
             logPulledIfDue(dx, dy);
-            panelParams.x = panelWindowX;
-            panelParams.y = panelWindowY;
             log.info("CLICK_MODE_PULL", "finger=" + oneDecimal(rawX) + ","
                     + oneDecimal(rawY) + " dist=" + oneDecimal(pullDistance));
         } else {
@@ -1968,7 +2275,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (!clickMode) {
             applyHandleWindowGeometry();
             panelParams.y = settledY;
-            updatePanelLayout(true);
+            // P45：同前——换模式那一帧必须已经是手柄几何。
+            updatePanelLayoutImmediate();
         }
         transitionTo(State.SETTLED);
         mainHandler.post(() -> {
@@ -1996,9 +2304,12 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (retractAnimator != null) {
             retractAnimator.cancel();
         }
-        panelView.setMirrored(Prefs.SIDE_LEFT.equals(switchTo));
-        // 收回动画以 settledX 为目标；切换时临时指向新侧，动画结束即重建控制器。
-        settledX = settledXForSide(switchTo);
+        // P51b：这里绝不能提前把 mirrored / settledX 改成新侧。
+        // 收回动画的终点是 settledX ± handleTouchPad，而 ± 的符号取自 isLeftEdge()（还是旧侧）、
+        // settledX 若已是新侧，两者一混就得到 1359 + 84 = 1443（屏幕外）——
+        // 竖条在收回动画末尾直接画到屏幕外，真机日志 windowX=1443 barX=1738。
+        // 旧注释「动画结束即重建控制器」是 P53 之前的设计，现在换手在原地滑移，
+        // 收尾时 applySideInPlace() 会按当时的 side 重新算一遍，这里只记目标。
         sideSwitchTarget = switchTo;
         sideSwitchActionSide = actionSide;
         retract("side_switch");
@@ -2008,20 +2319,159 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
      * P53：切换左右手不再走 PadService.reloadController()。
      * reload 的内部顺序是「先 destroy 旧控制器（移除窗口）→ 再 new 新控制器（创建窗口）」，
      * 两者之间会有一帧**两侧都没有窗口**，用户看到的就是收尾那一下闪黑。
-     * 面板在收回动画结束时已经停在新侧的停靠位、且 mirrored 已按新侧设置，
-     * 所以这里只把逻辑状态对齐，不移动窗口、不重建 —— 逐帧无变化。
+     *
+     * <p>P51：原地换侧也不能一步到位——窗口位置和 mirrored 分属两次窗口/绘制提交，
+     * 真机逐帧量到中间有 2 帧竖条整个不见（mirrored 已翻、窗口还在旧侧 ⇒ 画到窗口外）。
+     * 现在改成 {@link #SIDE_SHIFT_DURATION_MS} 的滑移：窗口缓动走到新侧，竖条在窗口内的
+     * 位置反向补，屏幕坐标始终连续；终点折叠面 = handleWidth，与 drawHandle 逐像素同源，
+     * 收尾换绘制模式看不出接缝。
      */
     private void applySideInPlace(String newSide) {
+        if (panelParams == null || !panelAttached) {
+            side = newSide;
+            settledX = settledXForSide();
+            panelView.setMirrored(isLeftEdge());
+            // ⚠️ 必须走具名几何：手柄态的窗口比停靠位内移了触摸识别余量，
+            // 直接写 settledX 会让竖条沉进屏幕边缘半个手指宽（P76b 真机踩过）。
+            applyHandleWindowGeometry();
+            panelParams.y = settledY;
+            updatePanelLayoutImmediate();
+            log.info("SIDE", "side=" + side + " settledX=" + settledX
+                    + " windowW=" + windowWidth + " handleW=" + handleWidth + " shift=0");
+            applyPendingHandleSizeIfSafe();
+            return;
+        }
+        final boolean fromLeft = isLeftEdge();
+        final boolean toLeft = Prefs.SIDE_LEFT.equals(newSide);
+        final int fromWindowX = panelParams.x;
+        final int fromWindowY = panelParams.y;
+        final int targetSettledX = settledXForSide(newSide);
+        final int targetWindowX = targetSettledX + (toLeft ? handleTouchPad : -handleTouchPad);
+        final float fromBarScreen = fromWindowX + (fromLeft
+                ? panelWidth - handleTouchPad - handleWidth : handleTouchPad);
+        final float targetBarScreen = targetWindowX + (toLeft
+                ? panelWidth - handleTouchPad - handleWidth : handleTouchPad);
+        // 整段动画里 mirrored 还是旧值，绘制基准固定按旧侧算。
+        final float base = fromLeft ? panelWidth - handleWidth : 0f;
+        cancelSideShiftAnimator();
+        panelView.setAdjustMode(false);
+        panelView.setPanelMode();
+        panelView.setContentAlpha(0f);
+        if (handleLayerAttached && handleLayerParams != null) {
+            if (applyTouchable(handleLayerParams, false)) {
+                handleLayerDirty = true;
+            }
+        }
+        log.info("SIDE_SHIFT", "start from=" + (fromLeft ? "left" : "right")
+                + " to=" + (toLeft ? "left" : "right")
+                + " windowX=" + fromWindowX + "->" + targetWindowX
+                + " barX=" + Math.round(fromBarScreen) + "->" + Math.round(targetBarScreen)
+                + " base=" + Math.round(base));
+        sideShiftAnimator = ValueAnimator.ofFloat(0f, 1f);
+        sideShiftAnimator.setDuration(SIDE_SHIFT_DURATION_MS);
+        sideShiftAnimator.setInterpolator(SIDE_SHIFT_EASE);
+        sideShiftAnimator.addUpdateListener(a -> {
+            float e = (float) a.getAnimatedValue();
+            int windowX = Math.round(interpolate(fromWindowX, targetWindowX, e));
+            panelParams.x = windowX;
+            panelParams.y = Math.round(interpolate(fromWindowY, settledY, e));
+            float barScreen = fromBarScreen + (targetBarScreen - fromBarScreen) * e;
+            panelView.setCollapseRect(handleWidth, handleHeight);
+            panelView.setCollapseInset(barScreen - windowX - base);
+            log.trace("SIDE_SHIFT_FRAME", "e=" + String.format(Locale.US, "%.3f", e)
+                    + " x=" + windowX + " bar=" + Math.round(barScreen)
+                    + " inset=" + Math.round(barScreen - windowX - base));
+            updatePanelLayoutImmediate();
+        });
+        sideShiftAnimator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (sideShiftAnimator == animation) {
+                    sideShiftAnimator = null;
+                }
+                finishSideShift(newSide, targetSettledX);
+            }
+        });
+        sideShiftAnimator.start();
+    }
+
+    private void finishSideShift(String newSide, int targetSettledX) {
         side = newSide;
-        settledX = settledXForSide();
+        settledX = targetSettledX;
         panelView.setMirrored(isLeftEdge());
-        // ⚠️ 必须走具名几何：手柄态的窗口比停靠位内移了 HANDLE_TOUCH_PAD_DP，
-        // 直接写 settledX 会让竖条沉进屏幕边缘半个手指宽（P76b 真机踩过）。
+        panelView.clearCollapseRect();
+        panelView.setContentAlpha(1f);
+        panelView.setHandleMode();
         applyHandleWindowGeometry();
         panelParams.y = settledY;
-        updatePanelLayout(true);
+        if (handleLayerAttached && handleLayerParams != null) {
+            if (applyTouchable(handleLayerParams, !handleSuppressed)) {
+                handleLayerDirty = true;
+            }
+        }
+        updatePanelLayoutImmediate();
+        forceResendGestureExclusion("side=" + newSide);
         log.info("SIDE", "side=" + side + " settledX=" + settledX
-                + " windowW=" + windowWidth + " handleW=" + handleWidth);
+                + " windowW=" + windowWidth + " handleW=" + handleWidth + " shift=1");
+        applyPendingHandleSizeIfSafe();
+    }
+
+    private void cancelSideShiftAnimator() {
+        if (sideShiftAnimator == null) {
+            return;
+        }
+        ValueAnimator animator = sideShiftAnimator;
+        sideShiftAnimator = null;
+        animator.cancel();
+    }
+
+    /**
+     * P51：控制器重建（切模式 / 拖滑杆 / 换注入通道）时先把新窗口挂上，
+     * 等它画出第一帧再拆旧的。旧顺序是「先 destroy 再 new」，
+     * 两次窗口操作之间竖条整个消失（真机量到 2~6 帧 = 18~54ms）。
+     * 新窗口画的是同一根竖条、同一位置，重叠一两帧看不出重影。
+     */
+    void destroyAfterFirstDraw(final PadController previous) {
+        if (previous == null) {
+            return;
+        }
+        if (panelView == null || !panelAttached) {
+            previous.destroy();
+            return;
+        }
+        final ViewTreeObserver observer = panelView.getViewTreeObserver();
+        final boolean[] done = {false};
+        final ViewTreeObserver.OnDrawListener[] listener = new ViewTreeObserver.OnDrawListener[1];
+        final Runnable detach = () -> {
+            if (observer.isAlive() && listener[0] != null) {
+                observer.removeOnDrawListener(listener[0]);
+            }
+        };
+        listener[0] = () -> {
+            if (done[0]) {
+                return;
+            }
+            done[0] = true;
+            // 不在 onDraw 里摘监听/拆窗口（会抛 IllegalStateException），排到本帧之后
+            // ——和任务抽屉交接（beginSwitcherHandoff）同一个坑、同一个写法。
+            panelView.post(() -> {
+                detach.run();
+                previous.destroy();
+            });
+        };
+        if (observer.isAlive()) {
+            observer.addOnDrawListener(listener[0]);
+        }
+        // 兜底：窗口要是没画出来（被系统回收/不可见），旧控制器也必须拆，不能留窗口。
+        mainHandler.postDelayed(() -> {
+            if (done[0]) {
+                return;
+            }
+            done[0] = true;
+            detach.run();
+            previous.destroy();
+        }, HANDOFF_DESTROY_TIMEOUT_MS);
+        panelView.invalidate();
     }
 
     /**
@@ -2031,6 +2481,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
      * 这时硬切会把正在拖的窗口挪走。单击模式的小窗几何走另一套（按 prefs 现算），
      * 也不在这里动，下次重建即生效。
      */
+    /** 等下一次停靠要补上的左右手（面板外面时切换只写 prefs，运行期 side 不会自己变）。 */
+    private String pendingSideSwitch;
+    /** 非单击模式已把待换手投递到主线程，尺寸过渡须等这条消息真正落到 sideShiftAnimator。 */
+    private boolean sideShiftPostPending;
+
     boolean switchSideNow(String targetSide) {
         if (!Prefs.SIDE_LEFT.equals(targetSide) && !Prefs.SIDE_RIGHT.equals(targetSide)) {
             return false;
@@ -2041,11 +2496,16 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (changed && panelAttached && !clickModeWindow && state == State.SETTLED) {
             applySideInPlace(targetSide);
             inPlace = true;
+        } else if (changed) {
+            // 面板在外面/单击模式：这里硬切会把正在拖的窗口挪走，但只写 prefs 又不会生效
+            // （side 字段只在构造时读一次）。记下来，等下一次停靠补上。
+            pendingSideSwitch = targetSide;
         }
         // 窗口换了位置，排除区必须重报（尺寸没变，applyHandleGestureExclusion 会去重跳过）。
         forceResendGestureExclusion("side=" + targetSide);
         log.info("SIDE", "source=api side=" + targetSide
-                + " changed=" + (changed ? 1 : 0) + " inplace=" + (inPlace ? 1 : 0));
+                + " changed=" + (changed ? 1 : 0) + " inplace=" + (inPlace ? 1 : 0)
+                + " pending=" + (pendingSideSwitch != null ? 1 : 0));
         return changed;
     }
 
@@ -2059,6 +2519,9 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         String cursorSide = upward
                 ? Prefs.CURSOR_SIDE_TOP : Prefs.CURSOR_SIDE_LEFT;
         setPullCursorPosition(cursorSide);
+        if (CURSOR_INIT_OHO) {
+            applyOhoPullCursorInit(dy);
+        }
         pullCursorOffsetX = cursorX - panelParams.x;
         pullCursorOffsetY = cursorY - panelParams.y;
         pullCursorSide = cursorSide;
@@ -2078,16 +2541,103 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 + " gap=" + Math.round(panelParams.y - (cursorY + cursorRadius)));
     }
 
-    private String currentEffectiveCursorSide() {
-        String preferredSide = prefs.getCursorSide();
-        if (!preferredSide.isEmpty()) {
-            return preferredSide;
+    /**
+     * 点击方向按钮时，以光标中心相对当前可视面板的位置决定“当前在哪儿”。
+     * 上方/内侧越过量至少一个为正时取较大的轴；两项都不为正时，按到既有
+     * 上/内落点的平方距离取近者。所有平局固定判上方，不保存任何记忆状态。
+     */
+    private String currentToggleSideFromCursorPosition() {
+        if (panelParams == null || panelWidth <= 0 || panelHeight <= 0
+                || windowWidth <= 0 || windowHeight <= 0
+                || screenWidth <= 0 || screenHeight <= 0) {
+            return null;
         }
-        if (Prefs.CURSOR_SIDE_TOP.equals(pullCursorSide)
-                || Prefs.CURSOR_SIDE_LEFT.equals(pullCursorSide)) {
-            return pullCursorSide;
+        float panelLeft = panelParams.x;
+        float panelRight = panelLeft + panelWidth;
+        float panelTop = panelParams.y;
+        float aboveDistance = panelTop - cursorY;
+        float inwardDistance = isLeftEdge()
+                ? cursorX - panelRight : panelLeft - cursorX;
+        if (!isFiniteCursorToggleValue(aboveDistance)
+                || !isFiniteCursorToggleValue(inwardDistance)) {
+            return null;
         }
-        return gestureDy > 0f ? Prefs.CURSOR_SIDE_LEFT : Prefs.CURSOR_SIDE_TOP;
+        if (aboveDistance > 0f || inwardDistance > 0f) {
+            return aboveDistance >= inwardDistance
+                    ? Prefs.CURSOR_SIDE_TOP : Prefs.CURSOR_SIDE_LEFT;
+        }
+
+        // 与 setPullCursorPosition() 的两个既有落点同源；这里只取坐标比较距离。
+        float topX = clampScreenX(panelLeft + windowWidth / 2f);
+        float topY = clampScreenY(Math.max(dp(CURSOR_TOP_Y_DP), cursorTopFloorY()));
+        float innerX = clampScreenX(innerSideX(panelLeft, panelRight, dp(CURSOR_GAP_DP)));
+        float innerY = clampScreenY(panelTop + windowHeight / 2f);
+        if (!isFiniteCursorToggleValue(topX) || !isFiniteCursorToggleValue(topY)
+                || !isFiniteCursorToggleValue(innerX)
+                || !isFiniteCursorToggleValue(innerY)) {
+            return null;
+        }
+        double topDx = cursorX - topX;
+        double topDy = cursorY - topY;
+        double innerDx = cursorX - innerX;
+        double innerDy = cursorY - innerY;
+        double topDistanceSq = topDx * topDx + topDy * topDy;
+        double innerDistanceSq = innerDx * innerDx + innerDy * innerDy;
+        return topDistanceSq <= innerDistanceSq
+                ? Prefs.CURSOR_SIDE_TOP : Prefs.CURSOR_SIDE_LEFT;
+    }
+
+    private static boolean isFiniteCursorToggleValue(float value) {
+        return !Float.isNaN(value) && !Float.isInfinite(value);
+    }
+
+    /**
+     * 原版 {@code y5.w.j(f4, f8, z2)} 的移植（sidegesturepad 9.3.13.0）。
+     *
+     * <pre>
+     * 往上拖 (z2=true)：  指针顶 = max(手指Y − 2.5*英寸, 0)；面板未全显时贴同侧屏幕边缘
+     *                     左侧 x=0、右侧 x=屏宽−指针宽
+     * 往下拖 (z2=false)： 指针顶 = 手指Y − 指针高/2；左侧 x=min(1.2*英寸+手指X, 屏宽−英寸/2)
+     *                     右侧 x=max(手指X−1.2*英寸−指针宽, 0)
+     * </pre>
+     *
+     * <p>原版坐标是 ImageView 左上角，我们的是圆心，所以每项都 +cursorRadius。
+     * 原版首次调用时 move_area 还没布局（rect.top=0 ≤ 1 英寸）会退回用手指 Y——
+     * 我们拉出的那一刻正是这个处境，因此这里统一用手指 Y。
+     */
+    private void applyOhoPullCursorInit(float dy) {
+        // 原版 z2 = !(当前 rawY > 按下 rawY + touchSlop)，即「明确往下拖」才算 false。
+        boolean downward = dy > touchSlop;
+        float size = cursorRadius * 2f;
+        float edgeLimit = screenWidth - CURSOR_INIT_MIN_INCH * xdpiPx / 2f;
+        float desiredX;
+        float desiredY;
+        if (downward) {
+            float offset = CURSOR_INIT_SIDE_INCH * xdpiPx;
+            desiredX = isLeftEdge()
+                    ? Math.min(offset + gestureDownRawX, edgeLimit) + cursorRadius
+                    : Math.max(gestureDownRawX - offset - size, 0f) + cursorRadius;
+            desiredY = gestureDownRawY;
+        } else {
+            desiredX = isLeftEdge()
+                    ? cursorRadius
+                    : screenWidth - size + cursorRadius;
+            // 原版：move_area 已布局 → 锚它；未布局（rect.top ≤ 1 英寸）才退回手指 Y。
+            float moveArea = dp(CURSOR_INIT_MOVE_AREA_DP);
+            float anchorTop = Math.max(0f, (screenHeight - moveArea) / 2f);
+            if (anchorTop <= CURSOR_INIT_MIN_INCH * xdpiPx) {
+                anchorTop = gestureDownRawY;
+            }
+            desiredY = Math.max(anchorTop - CURSOR_INIT_UP_INCH * xdpiPx, 0f) + cursorRadius;
+        }
+        cursorX = clampScreenX(desiredX);
+        cursorY = clampScreenY(desiredY);
+        log.info("CURSOR_INIT", "algo=oho down=" + (downward ? 1 : 0)
+                + " anchor=" + Math.round(downward ? gestureDownRawY
+                        : Math.max(0f, (screenHeight - dp(CURSOR_INIT_MOVE_AREA_DP)) / 2f))
+                + " xdpi=" + Math.round(xdpiPx) + " size=" + oneDecimal(size)
+                + " fx=" + oneDecimal(gestureDownRawX) + " fy=" + oneDecimal(gestureDownRawY)
+                + " x=" + oneDecimal(cursorX) + " y=" + oneDecimal(cursorY));
     }
 
     /** 计算并写入当前侧光标中心坐标；调用方负责立即刷新 CursorView。 */
@@ -2223,7 +2773,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     /**
-     * 手柄态的窗口几何：把窗口往"屏幕内侧"挪 {@link #HANDLE_TOUCH_PAD_DP}，
+     * 手柄态的窗口几何：把窗口往"屏幕内侧"挪触摸识别余量，
      * 竖条的屏幕位置由 PanelView 的绘制偏移补回来，所以看起来没动。
      *
      * <p>⚠️ 只允许挪窗口，绝不允许改窗口尺寸：P13 真机逐帧结论是，系统会对
@@ -2290,16 +2840,67 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 || candidate.y - cursorRadius >= panelBottom;
     }
 
+    /**
+     * 原版 sidegesturepad 的光标增益（b6/a.java ACTION_MOVE 分支）：
+     *
+     * <pre>
+     *   d = ln(max(|vx|, |vy|)) / 2      手机 /2，平板 /1.5
+     *   速度不超过 e^3≈20.09px/s 时 d 恒为 1.5；20.09..30 连续接入对数曲线
+     *   k = max(min(d, 5.0) * (speedPref/100 + 0.5), 1.0)
+     * </pre>
+     *
+     * <p>我们的 sensitivity 就是 speedPref 的等价物：1.0 ↔ 原版默认 50。
+     * 旧曲线 1+ln(1+v/800)/2 只有原版约 40%，横向尤其明显。
+     */
+    private float cursorGain(float velocity, float sensitivity) {
+        // P57：以 v/30 线性权重衔接慢端 1.5 与连续对数曲线；30px/s 处不再硬切。
+        final double logD = Math.log(Math.max(velocity, 1f)) / CURSOR_GAIN_LOG_DIVISOR;
+        final double slowBlend = Math.min(1.0, Math.max(0.0, velocity / CURSOR_GAIN_SLOW_PX));
+        double d = CURSOR_GAIN_SLOW_K * (1.0 - slowBlend)
+                + Math.max(logD, CURSOR_GAIN_SLOW_K) * slowBlend;
+        final int variant = prefs.getCursorCurveVariant();
+        if (variant != 0) {
+            // P55：只在慢端削减。fade 从 30px/s 处的 1 衰减到 vFade 处的 0；
+            // v ≥ vFade 后 cut 恒为 0 ⇒ 与档 0 逐值相同（用户要求「快移手感不变」）。
+            // fade 的分母是 ln(vFade/30) 的预计算值（热路径不重复算 log）。
+            final double fade = 1.0 - Math.log(
+                    Math.max(velocity, CURSOR_GAIN_SLOW_PX) / CURSOR_GAIN_SLOW_PX)
+                    / CURSOR_ADAPT_FADE_LOG[variant];
+            final double cut = CURSOR_ADAPT_MAX_CUT[variant] * Math.max(0.0, fade);
+            d = Math.max(d - cut, CURSOR_ADAPT_MIN_D);
+        }
+        double capped = Math.min(d, Prefs.CURSOR_MAX_K);
+        return smoothGain((float) Math.max(capped * sensitivity, 1.0), capped);
+    }
+
+    /** 指数平滑：τ 随归一化增益变化，a = 1 - e^(-dt/τ)，与帧率无关。 */
+    private float smoothGain(float raw, double normalized) {
+        final long now = SystemClock.uptimeMillis();
+        if (gainSmooth < 0f) {
+            gainSmooth = raw;
+            gainSmoothAt = now;
+            return raw;
+        }
+        final long dt = Math.max(1L, now - gainSmoothAt);
+        gainSmoothAt = now;
+        // P58：τ 线性插值。慢移（低增益）用大 τ 把噪声压平；快移用小 τ 立即跟手。
+        final double t = Math.min(1.0, Math.max(0.0,
+                (normalized - GAIN_TAU_SLOW_D) / (GAIN_TAU_FAST_D - GAIN_TAU_SLOW_D)));
+        final double tau = GAIN_TAU_SLOW_MS + (GAIN_TAU_FAST_MS - GAIN_TAU_SLOW_MS) * t;
+        final float a = (float) (1.0 - Math.exp(-dt / tau));
+        gainSmooth += a * (raw - gainSmooth);
+        return gainSmooth;
+    }
+
     private void moveCursor(float dx, float dy, float velocity) {
         if (dx == 0f && dy == 0f) {
             return;
         }
         float safeVelocity = velocity > 0f ? velocity : 0f;
-        double rawK = 1.0 + Math.log(1.0 + safeVelocity / 800.0) / 2.0;
-        float k = (float) Math.max(1.0, Math.min(Prefs.CURSOR_MAX_K, rawK));
         float sensitivity = prefs.getSensitivity();
-        float desiredX = cursorX + dx * k * sensitivity;
-        float desiredY = cursorY + dy * k * sensitivity;
+        float k = cursorGain(safeVelocity, sensitivity);
+        float desiredX = cursorX + dx * k;
+        float desiredY = cursorY + dy * k;
         float nextX = clampCursorX(desiredX);
         float nextY = clampCursorY(desiredY);
         boolean topFloorApplied = false;
@@ -2594,6 +3195,27 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 Prefs.ARROW_SWIPE_DURATION_MS);
     }
 
+    private long retractDurationMs() {
+        return RETRACT_DURATION_BY_VARIANT[prefs.getRetractVariant()];
+    }
+
+    private TimeInterpolator retractEase() {
+        switch (prefs.getRetractVariant()) {
+            case 1:
+                return RETRACT_LIVELY_EASE;
+            case 2:
+                return RETRACT_SWEEP_EASE;
+            case 3:
+                return RETRACT_BOUNCE_EASE;
+            default:
+                return RETRACT_EASE;
+        }
+    }
+
+    private float retractFadeEnd() {
+        return RETRACT_FADE_BY_VARIANT[prefs.getRetractVariant()];
+    }
+
     private void retract(String reason) {
         if (state != State.ACTIVE && state != State.PULLING && state != State.ADJUST) {
             return;
@@ -2615,22 +3237,43 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         transitionTo(State.RETRACTING);
         retractStartX = panelParams.x;
         retractStartY = panelParams.y;
+        // P51c：快捷菜单换手时，收回动画要收在「松手那一端」——那一端就是切换后的目标侧。
+        // 以前这里按 isLeftEdge()（还是旧侧）算终点，于是先横跨整屏缩回旧侧、再滑回来；
+        // 用户看到的是「缩回原端 → 平移过去」两段多余路程。
+        final String collapseSide = sideSwitchTarget != null ? sideSwitchTarget : side;
+        final boolean collapseLeft = Prefs.SIDE_LEFT.equals(collapseSide);
+        // 绘制锚点仍按旧侧（mirrored 不在这里翻，免得连带影响 handleLeftInWindow）；
+        // 需要补的内缩量见下面 base。
+        final boolean fromLeft = isLeftEdge();
+        // P50：动画的 x 终点直接取"手柄态的窗口位"，收尾就不必再挪窗口。
+        final int retractTargetX = settledXForSide(collapseSide)
+                + (collapseLeft ? handleTouchPad : -handleTouchPad);
+        log.info("SHRINK_X", "start=" + retractStartX + " target=" + retractTargetX
+                + " side=" + collapseSide + " from=" + (fromLeft ? "left" : "right")
+                + " switch=" + (sideSwitchTarget != null));
+        // 竖条在窗口内的左沿（与 PanelView.handleLeftInWindow 同源）。
+        final float barLeftInWindow = collapseLeft
+                ? panelWidth - handleTouchPad - handleWidth
+                : handleTouchPad;
 
         retractAnimator = ValueAnimator.ofFloat(0f, 1f);
-        retractAnimator.setDuration(RETRACT_DURATION_MS);
-        retractAnimator.setInterpolator(RETRACT_EASE);
+        retractAnimator.setDuration(retractDurationMs());
+        retractAnimator.setInterpolator(retractEase());
         retractAnimator.addUpdateListener(a -> {
             if (state != State.RETRACTING) {
                 return;
             }
             float e = (float) a.getAnimatedValue();
-            panelParams.x = Math.round(interpolate(retractStartX, settledX, e));
-            panelParams.y = Math.round(interpolate(retractStartY, settledY, e));
+            panelParams.x = Math.round(interpolate(retractStartX, retractTargetX, Math.min(1f, e)));
+            panelParams.y = Math.round(interpolate(retractStartY, settledY, Math.min(1f, e)));
             // 起点 rect → 终点 rect：w panelWidth→handleWidth、h panelHeight→handleHeight；右侧 [x,x+w]→[settledX,settledX+handleWidth]，左侧 [x+panelWidth-w,x+panelWidth]→[edgeInset,edgeInset+handleWidth]，纵向 [y,y+h]→[settledY,settledY+handleHeight]，与 drawHandle 同源。
             float w = panelWidth + (handleWidth - panelWidth) * e;
             float h = panelHeight + (handleHeight - panelHeight) * e;
+            // 面板态的左沿基准（mirrored 时贴窗口右边长），内缩量把窗口多走的那段补回去。
+            float base = fromLeft ? panelWidth - w : 0f;
+            panelView.setCollapseInset(barLeftInWindow * e - base);
             panelView.setCollapseRect(w, h);
-            panelView.setContentAlpha(1f - Math.min(1f, e / RETRACT_CONTENT_FADE_END));
+            panelView.setContentAlpha(1f - Math.min(1f, e / retractFadeEnd()));
             log.trace("RETRACT_FRAME", "e=" + String.format(Locale.US, "%.3f", e)
                     + " x=" + panelParams.x + " w=" + Math.round(w) + " h=" + Math.round(h));
             updatePanelLayoutImmediate();
@@ -2644,24 +3287,36 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 if (state != State.RETRACTING) {
                     return;
                 }
+                final String switchTo = sideSwitchTarget;
+                final String actionSide = sideSwitchActionSide;
+                sideSwitchTarget = null;
+                sideSwitchActionSide = null;
+                if (switchTo != null) {
+                    // P51c：收回动画已经收在目标侧的手柄位，这里只把 side/settledX 落定，
+                    // 窗口一步都不再挪（以前这里是 applySideInPlace()，会再滑一段——
+                    // 而旧侧起点又和 1359+84=1443 那笔账撞在一起，竖条整段在屏幕外）。
+                    side = switchTo;
+                    settledX = settledXForSide(switchTo);
+                    panelView.setMirrored(isLeftEdge());
+                }
                 applyHandleWindowGeometry();
                 panelParams.y = settledY;
                 panelView.setCollapseRect(handleWidth, handleHeight);
                 panelView.clearCollapseRect();
                 panelView.setContentAlpha(1f);
                 panelView.setHandleMode();
-                updatePanelLayout(true);
-                if (sideSwitchTarget == null) {
+                // P45：换绘制模式与挪窗口必须落在同一帧。updatePanelLayout(true) 只是
+                // "尽快补一次"，动画最后一帧刚布局过（<16ms），它会被 MIN_LAYOUT_INTERVAL
+                // 推后一拍 —— 这一帧就会用「手柄模式的偏移 + 动画终点的窗口 x」绘制，
+                // 竖条被画到屏幕外，真机 6 次收回抓到 1 帧整条消失（像素级：填充占比 87%→0%）。
+                updatePanelLayoutImmediate();
+                if (switchTo == null) {
                     transitionTo(State.SETTLED);
                 } else {
-                    String switchTo = sideSwitchTarget;
-                    String actionSide = sideSwitchActionSide;
-                    sideSwitchTarget = null;
-                    sideSwitchActionSide = null;
                     prefs.setSide(switchTo);
                     haptics.tick(Haptics.REASON_TAP_UP);
-                    // P53：原地生效，避免 destroy→create 之间的空窗帧
-                    applySideInPlace(switchTo);
+                    log.info("SIDE", "side=" + side + " settledX=" + settledX
+                            + " windowW=" + windowWidth + " handleW=" + handleWidth + " shift=0");
                     log.info("MENU_ACTION", "action=switch to=" + actionSide + " ok=1");
                     transitionTo(State.SETTLED);
                 }
@@ -2735,13 +3390,21 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         boolean enabled = prefs.getGestureExclusion();
         int width = enabled ? panelParams.width : 0;
         int height = enabled ? panelParams.height : 0;
+        int layerWidth = enabled && handleLayerAttached && handleLayerParams != null
+                ? handleLayerParams.width : 0;
+        int layerHeight = enabled && handleLayerAttached && handleLayerParams != null
+                ? handleLayerParams.height : 0;
         if (width <= 0 || height <= 0) {
             // 0/0 表示"已清空"，避免每次布局更新都重复清一遍。
-            if (gestureExclusionWidth == 0 && gestureExclusionHeight == 0) {
+            if (gestureExclusionWidth == 0 && gestureExclusionHeight == 0
+                    && gestureExclusionLayerWidth == 0
+                    && gestureExclusionLayerHeight == 0) {
                 return;
             }
             gestureExclusionWidth = 0;
             gestureExclusionHeight = 0;
+            gestureExclusionLayerWidth = 0;
+            gestureExclusionLayerHeight = 0;
             try {
                 panelView.setSystemGestureExclusionRects(Collections.emptyList());
                 if (handleLayerAttached) {
@@ -2754,11 +3417,15 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             }
             return;
         }
-        if (width == gestureExclusionWidth && height == gestureExclusionHeight) {
+        if (width == gestureExclusionWidth && height == gestureExclusionHeight
+                && layerWidth == gestureExclusionLayerWidth
+                && layerHeight == gestureExclusionLayerHeight) {
             return;
         }
         gestureExclusionWidth = width;
         gestureExclusionHeight = height;
+        gestureExclusionLayerWidth = layerWidth;
+        gestureExclusionLayerHeight = layerHeight;
         try {
             panelView.setSystemGestureExclusionRects(
                     Collections.singletonList(new Rect(0, 0, width, height)));
@@ -2798,6 +3465,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         }
         gestureExclusionWidth = -1;
         gestureExclusionHeight = -1;
+        gestureExclusionLayerWidth = -1;
+        gestureExclusionLayerHeight = -1;
         try {
             panelView.setSystemGestureExclusionRects(Collections.emptyList());
             if (handleLayerAttached && handleLayerView != null) {
@@ -2847,15 +3516,24 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
             return;
         }
         if (up) {
-            if (!imeVisible) {
+            boolean enteringIme = !imeVisible;
+            if (enteringIme) {
                 imeSavedY = settledY;
             }
             imeVisible = true;
             imeTopPx = topPx;
+            if (enteringIme) {
+                syncHandleLayerLayout();
+                forceResendGestureExclusion("ime_touchpad");
+                updatePanelLayoutImmediate();
+            }
             liftForKeyboard();
         } else {
             imeVisible = false;
             imeTopPx = -1;
+            syncHandleLayerLayout();
+            forceResendGestureExclusion("ime_touchpad");
+            updatePanelLayoutImmediate();
             restoreAfterKeyboard();
         }
     }
@@ -2865,7 +3543,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         if (!started || panelParams == null) {
             return;
         }
-        int gap = dp(KEYBOARD_LIFT_GAP_DP);
+        final int gap = dp(kbLiftGapDp());
         if (settledY + handleHeight <= imeTopPx - gap) {
             return; // 竖条本来就在键盘上方，不折腾
         }
@@ -2880,6 +3558,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
                 + " imeTop=" + imeTopPx);
         settledY = targetY;
         animateHandleTo(targetY, "lift");
+    }
+
+    private int kbLiftGapDp() {
+        return KEYBOARD_LIFT_GAP_BY_VARIANT[prefs.getKbGapVariant()];
     }
 
     /** 键盘收起：回到进键盘前的位置（会话期间的拖动一律丢弃）。 */
@@ -2927,7 +3609,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
         animator.addListener(new android.animation.AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(android.animation.Animator animation) {
-                imeAnimator = null;
+                if (imeAnimator == animation) {
+                    imeAnimator = null;
+                    applyPendingHandleSizeIfSafe();
+                }
             }
         });
         imeAnimator = animator;
@@ -2937,9 +3622,10 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     private void cancelImeAnimator() {
-        if (imeAnimator != null) {
-            imeAnimator.cancel();
+        android.animation.ValueAnimator animator = imeAnimator;
+        if (animator != null) {
             imeAnimator = null;
+            animator.cancel();
         }
     }
 
@@ -2954,8 +3640,8 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
 
     private void performPanelLayoutUpdate(long now) {
         lastLayoutUpdateTime = now;
-        applyHandleGestureExclusion();
         syncHandleLayerLayout();
+        applyHandleGestureExclusion();
         log.trace("WINDOW_GEOM", "x=" + panelParams.x + " y=" + panelParams.y
                 + " w=" + panelParams.width + " h=" + panelParams.height
                 + " mode=" + panelView.getModeName());
@@ -3010,7 +3696,7 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private void clearPullCursorState() {
         pullCursorLocked = false;
         pullCursorTracking = false;
-        // 保留最近一次拖出侧：P15 在无偏好时据此把已完成拖出的光标切到对侧。
+        // 保留最近落点侧，供移动时的顶部圆顶限位；P90 按钮不再据它判当前位置。
         pullPopRawX = 0f;
         pullPopRawY = 0f;
         pullPopPanelX = 0f;
@@ -3049,8 +3735,11 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     }
 
     private float clampCursorX(float desiredX) {
-        float minimum = Math.min(cursorRadius, screenWidth / 2f);
-        float maximum = Math.max(minimum, screenWidth - cursorRadius);
+        // 原版把指针左边界夹在 [-size/3, screenW - size + size/3]：推到边还有一点余量，
+        // 换成我们的圆心坐标即 [半径 - 2/3 半径, 屏宽 - 半径 + 2/3 半径]。
+        float overshoot = cursorRadius * CURSOR_EDGE_OVERSHOOT_RATIO;
+        float minimum = Math.min(cursorRadius - overshoot, screenWidth / 2f);
+        float maximum = Math.max(minimum, screenWidth - cursorRadius + overshoot);
         return Math.max(minimum, Math.min(maximum, desiredX));
     }
 
@@ -3071,6 +3760,12 @@ final class PadController implements PanelView.Listener, SideToggleBar.Listener,
     private int yPercentToPixels(int yPercent) {
         int travel = Math.max(0, screenHeight - handleHeight);
         return Math.round(travel * yPercent / 100f);
+    }
+
+    /** 构造与运行期目标共用同一像素上限；不能拿 View 的旧高度当 clamp。 */
+    private int clampHandleHeight(int requested) {
+        int maxDrawable = Math.max(dp(24), windowHeight - dp(8));
+        return Math.min(requested, maxDrawable);
     }
 
     private int dp(float value) {

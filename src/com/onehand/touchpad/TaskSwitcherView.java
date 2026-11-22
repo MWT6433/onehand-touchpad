@@ -2,6 +2,9 @@
 // Copyright (C) 2026 OneHand Touchpad contributors
 package com.onehand.touchpad;
 
+// P74：外壳恢复为不随 contentAlpha 淡出，保证抽屉矩形能从手柄矩形连续长出来。
+// P63：任务抽屉按屏幕可用高度限高并支持列表滚动。
+
 import android.content.Context;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.PackageManager;
@@ -105,15 +108,11 @@ final class TaskSwitcherView extends View {
     private static final long PRESS_OUT_MS = 180L;
     private static final float MORPH_SCRIM_FULL = 0.55f;
     private static final int TASK_CLOSE_MARK_DP = 7;
-    private static final int TITLE_TOP_DP = 7;
-    private static final int TITLE_LINE_HEIGHT_DP = 12;
-    private static final int TITLE_GAP_DP = 4;
     private static final int TEXT_GAP_DP = 8;
     private static final int TEXT_LINE_GAP_DP = 2;
     private static final int ICON_CACHE_LIMIT = 16;
     private static final long SUBTITLE_MAX_AGE_MS =
             365L * 24L * 60L * 60L * 1000L;
-    private static final float TITLE_SIZE_SP = 10f;
     private static final float NAME_SIZE_SP = 13f;
     private static final float SUBTITLE_SIZE_SP = 10f;
     private static final float INNER_STROKE_DP = 0.35f;
@@ -133,7 +132,6 @@ final class TaskSwitcherView extends View {
     private static final int HANDLE_FILL_COLOR =
             Color.argb(Math.round(Prefs.HANDLE_ALPHA * 255f), 0, 0, 0);
     private static final int CURRENT_ROW_COLOR = 0xFF3070E8;
-    private static final int TITLE_COLOR = 0xA8FFFFFF;
     private static final int NAME_COLOR = 0xFFFFFFFF;
     private static final int SUBTITLE_COLOR = 0x9EFFFFFF;
     private static final int FALLBACK_ICON_COLOR = 0xFF6B6B70;
@@ -154,6 +152,7 @@ final class TaskSwitcherView extends View {
     /** 打开/收起形变进度：0 = 手柄矩形，1 = 抽屉矩形。 */
     // 初值必须是 0（= 手柄形态）：万一首帧在任何配置之前发生，也只能画成横条。
     private float morph = 0f;
+    private float lastLoggedMorph = -1f;
     private float pressAmount = 0f;
     private int pressRow = -1;
     private boolean pressOnClose = false;
@@ -189,7 +188,6 @@ final class TaskSwitcherView extends View {
     private final Paint outerStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint innerStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint rowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint titlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint namePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint subtitlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fallbackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -207,6 +205,14 @@ final class TaskSwitcherView extends View {
     private float drawerWidth;
     private float drawerHeight;
     private float rowsTop;
+    /** 全部任务行的自然内容高度，含上下内边距。 */
+    private float contentHeight;
+    /** 当前限高下可滚动的最大距离；内容未超限时为 0。 */
+    private float maxScroll;
+    /** 列表向上的滚动距离；0 表示内容顶部对齐。 */
+    private float scrollOffset;
+    private boolean scrolling;
+    private float downScroll;
     private int activePointerId = MotionEvent.INVALID_POINTER_ID;
     private float touchDownX;
     private float touchDownY;
@@ -272,10 +278,6 @@ final class TaskSwitcherView extends View {
         closeLinePaint.setStrokeWidth(dp(TASK_CLOSE_LINE_DP));
         closeLinePaint.setStrokeCap(Paint.Cap.ROUND);
         closeLinePaint.setColor(TASK_CLOSE_MARK_COLOR);
-        titlePaint.setTextSize(sp(TITLE_SIZE_SP));
-        titlePaint.setColor(TITLE_COLOR);
-        titlePaint.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
-        titlePaint.setLetterSpacing(0.12f);
         namePaint.setTextSize(sp(NAME_SIZE_SP));
         namePaint.setColor(NAME_COLOR);
         namePaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.NORMAL));
@@ -294,20 +296,40 @@ final class TaskSwitcherView extends View {
     }
 
     private void layoutDrawer(float handleTop) {
-        rowsTop = dp(TITLE_TOP_DP + TITLE_LINE_HEIGHT_DP + TITLE_GAP_DP);
+        // P44：顶部「最近使用」标题已删，上下留白都走 DRAWER_PADDING_DP，
+        // drawerHeight 里 rowsTop 与末尾那个 DRAWER_PADDING_DP 因此逐像素对称。
+        rowsTop = dp(DRAWER_PADDING_DP);
         // 空态：没有行也要占一行的高度，用来放提示文字。
         int visibleRows = tasks.isEmpty() && emptyMessage != null
                 ? 1 : tasks.size();
-        drawerHeight = rowsTop
+        contentHeight = rowsTop
                 + visibleRows * rowHeight
                 + Math.max(0, visibleRows - 1) * dp(ROW_GAP_DP)
                 + dp(DRAWER_PADDING_DP);
+        // 上下各留 DRAWER_EDGE_GAP_DP，卡片高度永不越过屏幕可用区。
+        float maxDrawerHeight = screenHeight - 2f * dp(DRAWER_EDGE_GAP_DP);
+        drawerHeight = Math.min(contentHeight, maxDrawerHeight);
+        maxScroll = Math.max(0f, contentHeight - drawerHeight);
+        scrollOffset = clamp(scrollOffset, 0f, maxScroll);
         float minimumTop = dp(DRAWER_EDGE_GAP_DP);
         float maximumTop = Math.max(minimumTop,
                 screenHeight - drawerHeight - dp(DRAWER_EDGE_GAP_DP));
         drawerTop = clamp(handleTop, minimumTop, maximumTop);
         drawerRect.set(drawerLeft, drawerTop,
                 drawerLeft + drawerWidth, drawerTop + drawerHeight);
+        // P66 诊断：真机上「只显示 5 行」而 6 行内容高度应为 1053.5px，
+        // 需要真值判断是 tasks.size()、rowHeight 还是 screenHeight 与预期不符。
+        // 定位后可删；保留也无害（只在开抽屉时打一次）。
+        ProbeLog.get().info("TASK_LAYOUT",
+                "rows=" + tasks.size()
+                + " content=" + (int) contentHeight
+                + " drawer=" + (int) drawerHeight
+                + " maxScroll=" + (int) maxScroll
+                + " top=" + (int) drawerTop
+                + " screenH=" + screenHeight
+                + " rowH=" + (int) rowHeight
+                + " gap=" + (int) dp(ROW_GAP_DP)
+                + " pad=" + (int) dp(DRAWER_PADDING_DP));
     }
 
     /**
@@ -372,6 +394,32 @@ final class TaskSwitcherView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
+        // 形变：0 = 手柄矩形、1 = 抽屉矩形。和面板收回同一套（rect 插值 + 内容淡入淡出）。
+        float contentAlpha = 1f;
+        if (morph < 1f && !handleRect.isEmpty()) {
+            // 内容推后：卡片长到 45% 才开始显，75% 全亮（原来 0→45% 之间就全亮，
+            // 卡片还只有 31% 宽时文字已满不透明，看着像把一张贴图摊开）。
+            contentAlpha = smoothstep(MORPH_CONTENT_START, MORPH_CONTENT_FULL, morph);
+        }
+
+        // 遮罩走自己的曲线：挂到 contentAlpha 上会让末段"整屏突然一亮"。
+        // 遮罩是屏幕上最大的明暗变化，它决定"这一下什么时候算开始"。
+        // 原来 smoothstep(0,0.90)：内容全亮时遮罩才 46%，前段背景几乎不动。
+        // 现在线性映射到 0.55 铺满——起步立即变暗，且比卡片先收住。
+        float scrimAlpha = 0x99 * Math.min(1f, Math.max(0f, morph / MORPH_SCRIM_FULL));
+
+        // P71 诊断：抽屉动画期间像素法测不到手柄（卡片不透明遮挡），只能靠这一行
+        // 对齐 morph / contentAlpha / scrimAlpha 的时间线。
+        if (Math.abs(morph - lastLoggedMorph) > 0.01f) {
+            lastLoggedMorph = morph;
+            ProbeLog.get().info("SWITCHER_MORPH",
+                    "morph=" + morph
+                    + " content=" + contentAlpha
+                    + " scrim=" + scrimAlpha
+                    + " alpha=" + getAlpha()
+                    + " rows=" + (tasks == null ? -1 : tasks.size()));
+        }
+
         // 空态（有提示文字）也要把卡片画出来：只有"真的没东西可画"才只铺遮罩。
         // 真机实测：少了这个条件，空态就只剩整屏变暗、卡片不出现。
         if (tasks.isEmpty() && emptyMessage == null) {
@@ -384,14 +432,9 @@ final class TaskSwitcherView extends View {
             return;
         }
 
-        // 形变：0 = 手柄矩形、1 = 抽屉矩形。和面板收回同一套（rect 插值 + 内容淡入淡出）。
-        float contentAlpha = 1f;
         RectF card = drawerRect;
         float corner = drawerCorner;
         if (morph < 1f && !handleRect.isEmpty()) {
-            // 内容推后：卡片长到 45% 才开始显，75% 全亮（原来 0→45% 之间就全亮，
-            // 卡片还只有 31% 宽时文字已满不透明，看着像把一张贴图摊开）。
-            contentAlpha = smoothstep(MORPH_CONTENT_START, MORPH_CONTENT_FULL, morph);
             morphRect.set(
                     handleRect.left + (drawerRect.left - handleRect.left) * morph,
                     handleRect.top + (drawerRect.top - handleRect.top) * morph,
@@ -404,11 +447,6 @@ final class TaskSwitcherView extends View {
             corner = Math.min(drawerCorner, Math.min(card.width(), card.height()) * 0.5f);
         }
 
-        // 遮罩走自己的曲线：挂到 contentAlpha 上会让末段"整屏突然一亮"。
-        // 遮罩是屏幕上最大的明暗变化，它决定"这一下什么时候算开始"。
-        // 原来 smoothstep(0,0.90)：内容全亮时遮罩才 46%，前段背景几乎不动。
-        // 现在线性映射到 0.55 铺满——起步立即变暗，且比卡片先收住。
-        float scrimAlpha = 0x99 * Math.min(1f, Math.max(0f, morph / MORPH_SCRIM_FULL));
         scrimPaint.setAlpha(Math.round(scrimAlpha));
         canvas.drawRect(0f, 0f, screenWidth, screenHeight, scrimPaint);
         scrimPaint.setAlpha(0x99);
@@ -444,6 +482,13 @@ final class TaskSwitcherView extends View {
             morphClipPath.reset();
             morphClipPath.addRoundRect(card, corner, corner, Path.Direction.CW);
             canvas.clipPath(morphClipPath);
+        }
+        int contentLayer = contentAlpha < 1f
+                ? canvas.saveLayerAlpha(null, Math.round(255 * contentAlpha),
+                        Canvas.ALL_SAVE_FLAG)
+                : -1;
+
+        if (card != drawerRect && morph < 1f) {
             // 内容按抽屉坐标排版，这里缩放进正在形变的矩形，于是"窄条长成卡片"是连续的
             // 等比：只按宽度的比例缩放，横竖同倍。非等比缩放会把字形横向压到纵向的
             // 41%（sx 0.463 / sy 1.117），任何文字都会变成"被拉伸的贴图"。
@@ -452,12 +497,7 @@ final class TaskSwitcherView extends View {
             canvas.scale(contentScale, contentScale);
             canvas.translate(-drawerLeft, -drawerTop);
         }
-        int contentLayer = contentAlpha < 1f
-                ? canvas.saveLayerAlpha(null, Math.round(255 * contentAlpha),
-                        Canvas.ALL_SAVE_FLAG)
-                : -1;
 
-        drawTitle(canvas);
         drawRows(canvas);
 
         if (contentLayer >= 0) {
@@ -489,24 +529,25 @@ final class TaskSwitcherView extends View {
                 Math.round(Color.blue(from) * q + Color.blue(to) * p));
     }
 
-    private void drawTitle(Canvas canvas) {
-        titlePaint.setTextAlign(Paint.Align.LEFT);
-        // 小标题与图标列对齐：× 在行首时让过 × 列。
-        float titleInset = leftHandle
-                ? dp(DRAWER_PADDING_DP) + dp(TASK_CLOSE_GAP_DP) + closeTouchSize / 2f
-                        + dp(TEXT_GAP_DP)
-                : dp(TITLE_TOP_DP);
-        Paint.FontMetrics titleMetrics = titlePaint.getFontMetrics();
-        canvas.drawText("最近使用", drawerLeft + titleInset,
-                drawerTop + dp(TITLE_TOP_DP) - titleMetrics.ascent, titlePaint);
-    }
-
     private static float clamp01(float value) {
         return value < 0f ? 0f : (value > 1f ? 1f : value);
     }
 
     private float rowStart(int index) {
-        return MORPH_ROW_FIRST + index * MORPH_ROW_STAGGER;
+        // P67：错峰窗口必须落在 morph 能到达的范围内。原实现 0.74 + 0.055*index
+        // 在 index>=5 时超过 1.0，rowAlpha 的 clamp01 把它压成 0 —— 真机实测
+        // 8 个任务只画出 5 行（第 6 行起永远不显示）。
+        // 做法：把可用错峰跨度 (1 - ALPHA_WINDOW - FIRST) 平均分给所有行，
+        // 但不超过原步长，保证行数少时手感完全不变：
+        // <=3 行 = 0.055（与原实现逐值相同）；4 行 = 0.04；5 行 = 0.03；
+        // 8 行 ≈ 0.0171。4 行起末行 rowStart = 1 - ALPHA_WINDOW = 0.86；
+        // 更少行保留原步长，morph=1 时 alpha 仍会被 clamp01 抬到 1.0。
+        float span = 1f - MORPH_ROW_ALPHA_WINDOW - MORPH_ROW_FIRST;
+        int rowCount = Math.max(1, tasks.size());
+        float stagger = rowCount > 1
+                ? Math.min(MORPH_ROW_STAGGER, span / (rowCount - 1))
+                : 0f;
+        return MORPH_ROW_FIRST + index * stagger;
     }
 
     /** 行 alpha：前 MORPH_ROW_ALPHA_WINDOW 线性拉起（约 60ms）。 */
@@ -524,7 +565,13 @@ final class TaskSwitcherView extends View {
         float lineLeft = drawerLeft + dp(DRAWER_PADDING_DP) + dp(ROW_INNER_PADDING_DP);
         float lineRight = drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP)
                 - dp(ROW_INNER_PADDING_DP);
-        float currentTop = drawerTop + rowsTop;
+        int rowClipSave = canvas.save();
+        if (morph >= 1f) {
+            // 完全展开后只让列表可见区出现在卡片内，滚动行不会越过多圆角边界。
+            canvas.clipRect(drawerRect.left, drawerRect.top + rowsTop,
+                    drawerRect.right, drawerRect.bottom - dp(DRAWER_PADDING_DP));
+        }
+        float currentTop = drawerTop + rowsTop - scrollOffset;
         if (tasks.isEmpty()) {
             if (emptyMessage != null) {
                 // 空态：一行提示，和普通行同高同内缩；不可点、不可关、不高亮。
@@ -541,6 +588,7 @@ final class TaskSwitcherView extends View {
                 namePaint.setTextAlign(Paint.Align.LEFT);
                 namePaint.setColor(NAME_COLOR);
             }
+            canvas.restoreToCount(rowClipSave);
             return;
         }
         for (int index = 0; index < tasks.size(); index++) {
@@ -598,6 +646,7 @@ final class TaskSwitcherView extends View {
             }
             currentTop += rowHeight + dp(ROW_GAP_DP);
         }
+        canvas.restoreToCount(rowClipSave);
     }
 
     /**
@@ -759,6 +808,9 @@ final class TaskSwitcherView extends View {
         if (rows == null) {
             return;
         }
+        // P66：loadTasks 若被再次调用，旧行必须清掉，否则任务会累加、
+        // 抽屉高度也会按错误行数计算。
+        tasks.clear();
         Set<String> seenPackages = new HashSet<>();
         for (String raw : rows) {
             if (raw == null) {
@@ -805,6 +857,11 @@ final class TaskSwitcherView extends View {
             tasks.add(new TaskRow(
                     taskId, packageName, label, lastActiveTimeMs, icon));
         }
+        // P66：任务列表变了必须重算抽屉高度——layoutDrawer 只由
+        // 构造 / setHandleRect(edgeGap 变化时) / removeTaskRow 触发，
+        // 填充任务这条路径原本完全没有重算，高度会停在上一次的旧值。
+        layoutDrawer(drawerTop);
+        invalidate();
     }
 
     private Bitmap loadIcon(String packageName, String label)
@@ -867,7 +924,7 @@ final class TaskSwitcherView extends View {
                 || x > drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP)) {
             return -1;
         }
-        float currentTop = drawerTop + rowsTop;
+        float currentTop = drawerTop + rowsTop - scrollOffset;
         for (int index = 0; index < tasks.size(); index++) {
             if (y >= currentTop && y <= currentTop + rowHeight) {
                 return index;
@@ -924,6 +981,8 @@ final class TaskSwitcherView extends View {
                 activePointerId = event.getPointerId(0);
                 touchDownX = event.getX(0);
                 touchDownY = event.getY(0);
+                scrolling = false;
+                downScroll = scrollOffset;
                 // 按下当帧就有回应：先滑出 slop 会整个取消（按了不算，才敢反复按着玩）。
                 pressRow = rowIndexAt(touchDownX, touchDownY);
                 pressOnClose = pressRow >= 0 && closeTaskAt(touchDownX, touchDownY) != null;
@@ -932,16 +991,25 @@ final class TaskSwitcherView extends View {
                 }
                 return true;
             case MotionEvent.ACTION_MOVE:
-                if (pressRow >= 0 && Math.hypot(event.getX(0) - touchDownX,
+                if (!scrolling && Math.hypot(event.getX(0) - touchDownX,
                         event.getY(0) - touchDownY) > touchSlop) {
+                    scrolling = true;
                     animatePress(0f);
+                }
+                // 形变期卡片尺寸与内容变换仍在变化，此时滚动区没有稳定语义。
+                if (scrolling && morph >= 1f && maxScroll > 0f) {
+                    scrollOffset = clamp(downScroll - (event.getY(0) - touchDownY),
+                            0f, maxScroll);
+                    invalidate();
                 }
                 return true;
             case MotionEvent.ACTION_UP:
                 animatePress(0f);
+                scrolling = false;
                 return finishTap(event);
             case MotionEvent.ACTION_CANCEL:
                 animatePress(0f);
+                scrolling = false;
                 activePointerId = MotionEvent.INVALID_POINTER_ID;
                 return true;
             default:
@@ -989,7 +1057,7 @@ final class TaskSwitcherView extends View {
     }
 
     private TaskRow closeTaskAt(float x, float y) {
-        float currentTop = drawerTop + rowsTop;
+        float currentTop = drawerTop + rowsTop - scrollOffset;
         for (TaskRow task : tasks) {
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),
@@ -1003,7 +1071,7 @@ final class TaskSwitcherView extends View {
     }
 
     private TaskRow taskAt(float x, float y) {
-        float currentTop = drawerTop + rowsTop;
+        float currentTop = drawerTop + rowsTop - scrollOffset;
         for (TaskRow task : tasks) {
             rowRect.set(drawerLeft + dp(DRAWER_PADDING_DP), currentTop,
                     drawerLeft + drawerWidth - dp(DRAWER_PADDING_DP),

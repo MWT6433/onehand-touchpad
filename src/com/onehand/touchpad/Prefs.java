@@ -21,6 +21,11 @@ final class Prefs {
     static final float PANEL_SCALE_STEP = 0.05f;
     // 下限 = 光标半径（CURSOR_R_DP=11 → 38.5px），再细就比光标还窄
     static final int HANDLE_W_MIN = 11, HANDLE_W_MAX = 28, HANDLE_W_DEFAULT = 14;
+    static final String HANDLE_TOUCH_PAD = "handle_touch_pad_dp";
+    // 默认 24dp 保持原行为；0 = 只剩竖条本身可点，40dp 已接近常态的两倍。
+    static final int HANDLE_TOUCH_PAD_MIN = 0, HANDLE_TOUCH_PAD_MAX = 40,
+            HANDLE_TOUCH_PAD_DEFAULT = 24;
+    static final String DEBUG_TOUCH_PAD_VISIBLE = "debug_touch_pad_visible";
     // 上限受面板窗口高度约束（617px/3.5≈176dp），画不进更长的
     static final int HANDLE_H_MIN = 48, HANDLE_H_MAX = 160, HANDLE_H_DEFAULT = 96;
     static final int HANDLE_W_DP = 14;
@@ -33,6 +38,8 @@ final class Prefs {
     static final int SIDE_BAR_H_DP = 32;
     static final int CORNER_RADIUS_DP = 28;
     static final int EDGE_MARGIN_DP = 8;
+    /** 必须与 PadController.KEYBOARD_LIFT_GAP_DEFAULT_VARIANT 同值（P56：32dp 档）。 */
+    static final int KB_GAP_DEFAULT_VARIANT = 2;
     static final float HANDLE_ALPHA = 0.45f;
     static final int ARROW_CELL_BG_R_DP = 12;
     static final float ARROW_CHEVRON_STROKE_DP = 2.2f;
@@ -67,6 +74,9 @@ final class Prefs {
 
     private static final String FILE_NAME = "onehand_touchpad";
     private static final String KEY_SIDE = "side";
+    private static final String KEY_RETRACT_VARIANT = "dev_retract_variant";
+    private static final String KEY_KB_GAP_VARIANT = "dev_kb_gap_variant";
+    private static final String KEY_CURSOR_CURVE_VARIANT = "dev_cursor_curve";
     private static final String KEY_Y_PERCENT = "y_percent";
     private static final String KEY_ONBOARDED = "onboarded";
     private static final String KEY_KEYBOARD_LIFT = "keyboard_lift";
@@ -94,6 +104,30 @@ final class Prefs {
         preferences.edit().putString(KEY_SIDE, safeSide).apply();
     }
 
+    int getRetractVariant() {
+        return clamp(preferences.getInt(KEY_RETRACT_VARIANT, 1), 0, 3);
+    }
+
+    void setRetractVariant(int variant) {
+        preferences.edit().putInt(KEY_RETRACT_VARIANT, clamp(variant, 0, 3)).apply();
+    }
+
+    int getKbGapVariant() {
+        return clamp(preferences.getInt(KEY_KB_GAP_VARIANT, KB_GAP_DEFAULT_VARIANT), 0, 3);
+    }
+
+    void setKbGapVariant(int variant) {
+        preferences.edit().putInt(KEY_KB_GAP_VARIANT, clamp(variant, 0, 3)).apply();
+    }
+
+    int getCursorCurveVariant() {
+        return clamp(preferences.getInt(KEY_CURSOR_CURVE_VARIANT, 2), 0, 3);
+    }
+
+    void setCursorCurveVariant(int variant) {
+        preferences.edit().putInt(KEY_CURSOR_CURVE_VARIANT, clamp(variant, 0, 3)).apply();
+    }
+
     int getYPercent() {
         return clamp(preferences.getInt(KEY_Y_PERCENT, 50), 0, 100);
     }
@@ -110,6 +144,26 @@ final class Prefs {
     void setHandleWDp(int widthDp) {
         preferences.edit().putInt(HANDLE_W,
                 clamp(widthDp, HANDLE_W_MIN, HANDLE_W_MAX)).apply();
+    }
+
+    static int handleTouchPadDp(Context context) {
+        return clamp(of(context).preferences.getInt(
+                        HANDLE_TOUCH_PAD, HANDLE_TOUCH_PAD_DEFAULT),
+                HANDLE_TOUCH_PAD_MIN, HANDLE_TOUCH_PAD_MAX);
+    }
+
+    static void setHandleTouchPadDp(Context context, int widthDp) {
+        of(context).preferences.edit().putInt(HANDLE_TOUCH_PAD,
+                clamp(widthDp, HANDLE_TOUCH_PAD_MIN, HANDLE_TOUCH_PAD_MAX)).apply();
+    }
+
+    static boolean debugTouchPadVisible(Context context) {
+        return of(context).preferences.getBoolean(DEBUG_TOUCH_PAD_VISIBLE, false);
+    }
+
+    static void setDebugTouchPadVisible(Context context, boolean visible) {
+        of(context).preferences.edit()
+                .putBoolean(DEBUG_TOUCH_PAD_VISIBLE, visible).apply();
     }
 
     int getHandleHDp() {
